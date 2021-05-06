@@ -1,0 +1,132 @@
+class OpenSSL::PKey::RSA
+RSA is an asymmetric public key algorithm that has been formalized in RFC 3447. It is in widespread use in public key infrastructures (PKI) where certificates (cf. OpenSSL::X509::Certificate) often are issued on the basis of a public/private RSA key pair. RSA is used in a wide field of applications such as secure (symmetric) key exchange, e.g. when establishing a secure TLS/SSL connection. It is also used in various digital signature schemes.
+
+Public Class Methods
+generate(size) → RSA instance
+generate(size, exponent) → RSA instance
+Generates an RSA keypair. size is an integer representing the desired key size. Keys smaller than 1024 should be considered insecure. exponent is an odd number normally 3, 17, or 65537.
+
+new(size [, exponent]) → RSA instance
+new(encoded_key) → RSA instance
+new(encoded_key, pass_phrase) → RSA instance
+Generates or loads an RSA keypair. If an integer key_size is given it represents the desired key size. Keys less than 1024 bits should be considered insecure.
+
+A key can instead be loaded from an encoded_key which must be PEM or DER encoded. A pass_phrase can be used to decrypt the key. If none is given OpenSSL will prompt for the pass phrase.
+
+Examples
+OpenSSL::PKey::RSA.new 2048
+OpenSSL::PKey::RSA.new File.read 'rsa.pem'
+OpenSSL::PKey::RSA.new File.read('rsa.pem'), 'my pass phrase'
+Public Instance Methods
+blinding_off!()
+blinding_on!()
+export([cipher, pass_phrase]) → PEM-format String
+Outputs this keypair in PEM encoding. If cipher and pass_phrase are given they will be used to encrypt the key. cipher must be an OpenSSL::Cipher instance.
+
+Also aliased as: to_pem, to_s
+initialize_copy(p1)
+params → hash
+THIS METHOD IS INSECURE, PRIVATE INFORMATION CAN LEAK OUT!!!
+
+Stores all parameters of key to the hash. The hash has keys 'n', 'e', 'd', 'p', 'q', 'dmp1', 'dmq1', 'iqmp'.
+
+Don't use :-)) (It's up to you)
+
+private? → true | false
+Does this keypair contain a private key?
+
+private_decrypt(string) → String
+private_decrypt(string, padding) → String
+Decrypt string, which has been encrypted with the public key, with the private key. padding defaults to PKCS1_PADDING.
+
+private_encrypt(string) → String
+private_encrypt(string, padding) → String
+Encrypt string with the private key. padding defaults to PKCS1_PADDING. The encrypted string output can be decrypted using public_decrypt.
+
+public? → true
+The return value is always true since every private key is also a public key.
+
+public_decrypt(string) → String
+public_decrypt(string, padding) → String
+Decrypt string, which has been encrypted with the private key, with the public key. padding defaults to PKCS1_PADDING.
+
+public_encrypt(string) → String
+public_encrypt(string, padding) → String
+Encrypt string with the public key. padding defaults to PKCS1_PADDING. The encrypted string output can be decrypted using private_decrypt.
+
+public_key → RSA
+Makes new RSA instance containing the public key from the private key.
+
+set_crt_params(dmp1, dmq1, iqmp) → self
+Sets dmp1, dmq1, iqmp for the RSA instance. They are calculated by d mod (p - 1), d mod (q - 1) and q^(-1) mod p respectively.
+
+set_factors(p, q) → self
+Sets p, q for the RSA instance.
+
+set_key(n, e, d) → self
+Sets n, e, d for the RSA instance.
+
+sign_pss(digest, data, salt_length:, mgf1_hash:) → String
+Signs data using the Probabilistic Signature Scheme (RSA-PSS) and returns the calculated signature.
+
+RSAError will be raised if an error occurs.
+
+See verify_pss for the verification operation.
+
+Parameters
+digest
+A String containing the message digest algorithm name.
+
+data
+A String. The data to be signed.
+
+salt_length
+The length in octets of the salt. Two special values are reserved: :digest means the digest length, and :max means the maximum possible length for the combination of the private key and the selected message digest algorithm.
+
+mgf1_hash
+The hash algorithm used in MGF1 (the currently supported mask generation function (MGF)).
+
+Example
+data = "Sign me!"
+pkey = OpenSSL::PKey::RSA.new(2048)
+signature = pkey.sign_pss("SHA256", data, salt_length: :max, mgf1_hash: "SHA256")
+pub_key = pkey.public_key
+puts pub_key.verify_pss("SHA256", signature, data,
+                        salt_length: :auto, mgf1_hash: "SHA256") # => true
+to_der → DER-format String
+Outputs this keypair in DER encoding.
+
+to_pem([cipher, pass_phrase]) → PEM-format String
+Outputs this keypair in PEM encoding. If cipher and pass_phrase are given they will be used to encrypt the key. cipher must be an OpenSSL::Cipher instance.
+
+Alias for: export
+to_s([cipher, pass_phrase]) → PEM-format String
+Outputs this keypair in PEM encoding. If cipher and pass_phrase are given they will be used to encrypt the key. cipher must be an OpenSSL::Cipher instance.
+
+Alias for: export
+to_text → String
+THIS METHOD IS INSECURE, PRIVATE INFORMATION CAN LEAK OUT!!!
+
+Dumps all parameters of a keypair to a String
+
+Don't use :-)) (It's up to you)
+
+verify_pss(digest, signature, data, salt_length:, mgf1_hash:) → true | false
+Verifies data using the Probabilistic Signature Scheme (RSA-PSS).
+
+The return value is true if the signature is valid, false otherwise. RSAError will be raised if an error occurs.
+
+See sign_pss for the signing operation and an example code.
+
+Parameters
+digest
+A String containing the message digest algorithm name.
+
+data
+A String. The data to be signed.
+
+salt_length
+The length in octets of the salt. Two special values are reserved: :digest means the digest length, and :auto means automatically determining the length based on the signature.
+
+mgf1_hash
+The hash algorithm used in MGF1.
