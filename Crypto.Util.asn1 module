@@ -1,0 +1,248 @@
+This module provides minimal support for encoding and decoding ASN.1 DER objects.
+
+classCrypto.Util.asn1.DerObject(asn1Id=None, payload='', implicit=None, constructed=False, explicit=None)
+Base class for defining a single DER object.
+
+This class should never be directly instantiated.
+
+decode(der_encoded, strict=False)
+Decode a complete DER element, and re-initializes this object with it.
+
+Parameters:	der_encoded (byte string) – A complete DER element.
+Raises:	ValueError – in case of parsing errors.
+encode()
+Return this DER element, fully encoded as a binary byte string.
+
+classCrypto.Util.asn1.DerInteger(value=0, implicit=None, explicit=None)
+Class to model a DER INTEGER.
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerInteger
+>>> from binascii import hexlify, unhexlify
+>>> int_der = DerInteger(9)
+>>> print hexlify(int_der.encode())
+which will show 020109, the DER encoding of 9.
+
+And for decoding:
+
+>>> s = unhexlify(b'020109')
+>>> try:
+>>>   int_der = DerInteger()
+>>>   int_der.decode(s)
+>>>   print int_der.value
+>>> except ValueError:
+>>>   print "Not a valid DER INTEGER"
+the output will be 9.
+
+Variables:	value (integer) – The integer value
+decode(der_encoded, strict=False)
+Decode a complete DER INTEGER DER, and re-initializes this object with it.
+
+Parameters:	der_encoded (byte string) – A complete INTEGER DER element.
+Raises:	ValueError – in case of parsing errors.
+encode()
+Return the DER INTEGER, fully encoded as a binary string.
+
+classCrypto.Util.asn1.DerOctetString(value='', implicit=None)
+Class to model a DER OCTET STRING.
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerOctetString
+>>> from binascii import hexlify, unhexlify
+>>> os_der = DerOctetString(b'\xaa')
+>>> os_der.payload += b'\xbb'
+>>> print hexlify(os_der.encode())
+which will show 0402aabb, the DER encoding for the byte string b'\xAA\xBB'.
+
+For decoding:
+
+>>> s = unhexlify(b'0402aabb')
+>>> try:
+>>>   os_der = DerOctetString()
+>>>   os_der.decode(s)
+>>>   print hexlify(os_der.payload)
+>>> except ValueError:
+>>>   print "Not a valid DER OCTET STRING"
+the output will be aabb.
+
+Variables:	payload (byte string) – The content of the string
+classCrypto.Util.asn1.DerNull
+Class to model a DER NULL element.
+
+classCrypto.Util.asn1.DerSequence(startSeq=None, implicit=None)
+Class to model a DER SEQUENCE.
+
+This object behaves like a dynamic Python sequence.
+
+Sub-elements that are INTEGERs behave like Python integers.
+
+Any other sub-element is a binary string encoded as a complete DER sub-element (TLV).
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerSequence, DerInteger
+>>> from binascii import hexlify, unhexlify
+>>> obj_der = unhexlify('070102')
+>>> seq_der = DerSequence([4])
+>>> seq_der.append(9)
+>>> seq_der.append(obj_der.encode())
+>>> print hexlify(seq_der.encode())
+which will show 3009020104020109070102, the DER encoding of the sequence containing 4, 9, and the object with payload 02.
+
+For decoding:
+
+>>> s = unhexlify(b'3009020104020109070102')
+>>> try:
+>>>   seq_der = DerSequence()
+>>>   seq_der.decode(s)
+>>>   print len(seq_der)
+>>>   print seq_der[0]
+>>>   print seq_der[:]
+>>> except ValueError:
+>>>   print "Not a valid DER SEQUENCE"
+the output will be:
+
+3
+4
+[4, 9, b'']
+decode(der_encoded, strict=False, nr_elements=None, only_ints_expected=False)
+Decode a complete DER SEQUENCE, and re-initializes this object with it.
+
+Parameters:	
+der_encoded (byte string) – A complete SEQUENCE DER element.
+nr_elements (None or integer or list of integers) – The number of members the SEQUENCE can have
+only_ints_expected (boolean) – Whether the SEQUENCE is expected to contain only integers.
+strict (boolean) – Whether decoding must check for strict DER compliancy.
+Raises:	
+ValueError – in case of parsing errors.
+
+DER INTEGERs are decoded into Python integers. Any other DER element is not decoded. Its validity is not checked.
+
+encode()
+Return this DER SEQUENCE, fully encoded as a binary string.
+
+Raises:	ValueError – if some elements in the sequence are neither integers nor byte strings.
+hasInts(only_non_negative=True)
+Return the number of items in this sequence that are integers.
+
+Parameters:	only_non_negative (boolean) – If True, negative integers are not counted in.
+hasOnlyInts(only_non_negative=True)
+Return True if all items in this sequence are integers or non-negative integers.
+
+This function returns False is the sequence is empty, or at least one member is not an integer.
+
+Parameters:	only_non_negative (boolean) – If True, the presence of negative integers causes the method to return False.
+classCrypto.Util.asn1.DerObjectId(value='', implicit=None, explicit=None)
+Class to model a DER OBJECT ID.
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerObjectId
+>>> from binascii import hexlify, unhexlify
+>>> oid_der = DerObjectId("1.2")
+>>> oid_der.value += ".840.113549.1.1.1"
+>>> print hexlify(oid_der.encode())
+which will show 06092a864886f70d010101, the DER encoding for the RSA Object Identifier 1.2.840.113549.1.1.1.
+
+For decoding:
+
+>>> s = unhexlify(b'06092a864886f70d010101')
+>>> try:
+>>>   oid_der = DerObjectId()
+>>>   oid_der.decode(s)
+>>>   print oid_der.value
+>>> except ValueError:
+>>>   print "Not a valid DER OBJECT ID"
+the output will be 1.2.840.113549.1.1.1.
+
+Variables:	value (string) – The Object ID (OID), a dot separated list of integers
+decode(der_encoded, strict=False)
+Decode a complete DER OBJECT ID, and re-initializes this object with it.
+
+Parameters:	
+der_encoded (byte string) – A complete DER OBJECT ID.
+strict (boolean) – Whether decoding must check for strict DER compliancy.
+Raises:	
+ValueError – in case of parsing errors.
+
+encode()
+Return the DER OBJECT ID, fully encoded as a binary string.
+
+classCrypto.Util.asn1.DerBitString(value='', implicit=None, explicit=None)
+Class to model a DER BIT STRING.
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerBitString
+>>> from binascii import hexlify, unhexlify
+>>> bs_der = DerBitString(b'\xaa')
+>>> bs_der.value += b'\xbb'
+>>> print hexlify(bs_der.encode())
+which will show 040300aabb, the DER encoding for the bit string b'\xAA\xBB'.
+
+For decoding:
+
+>>> s = unhexlify(b'040300aabb')
+>>> try:
+>>>   bs_der = DerBitString()
+>>>   bs_der.decode(s)
+>>>   print hexlify(bs_der.value)
+>>> except ValueError:
+>>>   print "Not a valid DER BIT STRING"
+the output will be aabb.
+
+Variables:	value (byte string) – The content of the string
+decode(der_encoded, strict=False)
+Decode a complete DER BIT STRING, and re-initializes this object with it.
+
+Parameters:	
+der_encoded (byte string) – a complete DER BIT STRING.
+strict (boolean) – Whether decoding must check for strict DER compliancy.
+Raises:	
+ValueError – in case of parsing errors.
+
+encode()
+Return the DER BIT STRING, fully encoded as a binary string.
+
+classCrypto.Util.asn1.DerSetOf(startSet=None, implicit=None)
+Class to model a DER SET OF.
+
+An example of encoding is:
+
+>>> from Crypto.Util.asn1 import DerBitString
+>>> from binascii import hexlify, unhexlify
+>>> so_der = DerSetOf([4,5])
+>>> so_der.add(6)
+>>> print hexlify(so_der.encode())
+which will show 3109020104020105020106, the DER encoding of a SET OF with items 4,5, and 6.
+
+For decoding:
+
+>>> s = unhexlify(b'3109020104020105020106')
+>>> try:
+>>>   so_der = DerSetOf()
+>>>   so_der.decode(s)
+>>>   print [x for x in so_der]
+>>> except ValueError:
+>>>   print "Not a valid DER SET OF"
+the output will be [4, 5, 6].
+
+add(elem)
+Add an element to the set.
+
+Parameters:	elem (byte string or integer) – An element of the same type of objects already in the set. It can be an integer or a DER encoded object.
+decode(der_encoded, strict=False)
+Decode a complete SET OF DER element, and re-initializes this object with it.
+
+DER INTEGERs are decoded into Python integers. Any other DER element is left undecoded; its validity is not checked.
+
+Parameters:	
+der_encoded (byte string) – a complete DER BIT SET OF.
+strict (boolean) – Whether decoding must check for strict DER compliancy.
+Raises:	
+ValueError – in case of parsing errors.
+
+encode()
+Return this SET OF DER element, fully encoded as a binary string.
