@@ -1,0 +1,81 @@
+Cryptographic hash functions take arbitrary binary strings as input, and produce a random-like fixed-length output (called digest or hash value).
+
+It is practically infeasible to derive the original input data from the digest. In other words, the cryptographic hash function is one-way (pre-image resistance).
+
+Given the digest of one message, it is also practically infeasible to find another message (second pre-image) with the same digest (weak collision resistance).
+
+Finally, it is infeasible to find two arbitrary messages with the same digest (strong collision resistance).
+
+Regardless of the hash algorithm, an n bits long digest is at most as secure as a symmetric encryption algorithm keyed with n/2 bits (birthday attack).
+
+Hash functions can be simply used as integrity checks. In combination with a public-key algorithm, you can implement a digital signature.
+
+API principles
+../../_images/hashing.png
+Fig. 5 Generic state diagram for a hash object
+
+Every time you want to hash a message, you have to create a new hash object with the new() function in the relevant algorithm module (e.g. Crypto.Hash.SHA256.new()).
+
+A first piece of message to hash can be passed to new() with the data parameter:
+
+>> from Crypto.Hash import SHA256
+>>
+>> hash_object = SHA256.new(data=b'First')
+Note
+
+You can only hash byte strings or byte arrays (no Python 2 Unicode strings or Python 3 strings).
+
+Afterwards, the method update() can be invoked any number of times as necessary, with other pieces of message:
+
+>>> hash_object.update(b'Second')
+>>> hash_object.update(b'Third')
+The two steps above are equivalent to:
+
+>>> hash_object.update(b'SecondThird')
+At the end, the digest can be retrieved with the methods digest() or hexdigest():
+
+>>> print(hash_object.digest())
+b'}\x96\xfd@\xb2$?O\xca\xc1a\x10\x15\x8c\x94\xe4\xb4\x085"\xd5"\xa8\xa4C\x9e+\x00\x859\xc7A'
+>>> print(hash_object.hexdigest())
+7d96fd40b2243f4fcac16110158c94e4b4083522d522a8a4439e2b008539c741
+Attributes of hash objects
+Every hash object has the following attributes:
+
+Attribute	Description
+digest_size	Size of the digest in bytes, that is, the output of the digest() method. It does not exist for hash functions with variable digest output (such as Crypto.Hash.SHAKE128). This is also a module attribute.
+block_size	The size of the message block in bytes, input to the compression function. Only applicable for algorithms based on the Merkle-Damgard construction (e.g. Crypto.Hash.SHA256). This is also a module attribute.
+oid	A string with the dotted representation of the ASN.1 OID assigned to the hash algorithm.
+Modern hash algorithms
+SHA-2 family
+
+SHA-224
+SHA-256
+SHA-384
+SHA-512, SHA-512/224, SHA-512/256
+SHA-3 family
+
+SHA3-224
+SHA3-256
+SHA3-384
+SHA3-512
+BLAKE2
+
+BLAKE2s
+BLAKE2b
+Extensible-Output Functions (XOF)
+SHAKE (in the SHA-3 family)
+
+SHAKE128
+SHAKE256
+Message Authentication Code (MAC) algorithms
+HMAC
+CMAC
+Poly1305
+Historic hash algorithms
+The following algorithms should not be used in new designs:
+
+SHA-1
+MD2
+MD5
+RIPEMD-160
+Keccak
