@@ -1,0 +1,202 @@
+ 
+#PyCryptodome
+Features
+Installation
+Compatibility with PyCrypto
+API documentation
+Crypto.Cipher package
+Crypto.Signature package
+Crypto.Hash package
+Crypto.PublicKey package
+Crypto.Protocol package
+Key Derivation Functions
+PBKDF2
+scrypt
+bcrypt
+HKDF
+PBKDF1
+Secret Sharing Schemes
+Crypto.IO package
+Crypto.Random package
+Crypto.Util package
+Examples
+Frequently Asked Questions
+Contribute and support
+Future plans
+Changelog
+License
+PyCryptodome
+Docs » API documentation » Crypto.Protocol package » Key Derivation Functions
+Key Derivation Functions
+This module contains a collection of standard key derivation functions.
+
+A key derivation function derives one or more secondary secret keys from one primary secret (a master key or a pass phrase).
+
+This is typically done to insulate the secondary keys from each other, to avoid that leakage of a secondary key compromises the security of the master key, or to thwart attacks on pass phrases (e.g. via rainbow tables).
+
+PBKDF2
+PBKDF2 is the most widespread algorithm for deriving keys from a password, originally defined in version 2.0 of the PKCS#5 standard or in RFC2898.
+
+It is computationally expensive (a property that can be tuned via the count parameter) so as to thwart dictionary and rainbow tables attacks. However, it uses a very limited amount of RAM which makes it insufficiently protected against advanced and motivated adversaries that can leverage GPUs.
+
+New applications and protocols should use scrypt or bcrypt instead.
+
+For example, if you need to derive two AES256 keys:
+
+from Crypto.Protocol.KDF import PBKDF2
+from Crypto.Hash import SHA512
+from Crypto.Random import get_random_bytes
+
+password = b'my super secret'
+salt = get_random_bytes(16)
+keys = PBKDF2(password, salt, 64, count=1000000, hmac_hash_module=SHA512)
+key1 = keys[:32]
+key2 = keys[32:]
+Crypto.Protocol.KDF.PBKDF2(password, salt, dkLen=16, count=1000, prf=None, hmac_hash_module=None)
+Derive one or more keys from a password (or passphrase).
+
+This function performs key derivation according to the PKCS#5 standard (v2.0).
+
+Parameters:	
+password (string or byte string) – The secret password to generate the key from.
+salt (string or byte string) – A (byte) string to use for better protection from dictionary attacks. This value does not need to be kept secret, but it should be randomly chosen for each derivation. It is recommended to use at least 16 bytes.
+dkLen (integer) –
+The cumulative length of the keys to produce.
+
+Due to a flaw in the PBKDF2 design, you should not request more bytes than the prf can output. For instance, dkLen should not exceed 20 bytes in combination with HMAC-SHA1.
+
+count (integer) –
+The number of iterations to carry out. The higher the value, the slower and the more secure the function becomes.
+
+You should find the maximum number of iterations that keeps the key derivation still acceptable on the slowest hardware you must support.
+
+Although the default value is 1000, it is recommended to use at least 1000000 (1 million) iterations.
+
+prf (callable) – A pseudorandom function. It must be a function that returns a pseudorandom byte string from two parameters: a secret and a salt. The slower the algorithm, the more secure the derivation function. If not specified, HMAC-SHA1 is used.
+hmac_hash_module (module) – A module from Crypto.Hash implementing a Merkle-Damgard cryptographic hash, which PBKDF2 must use in combination with HMAC. This parameter is mutually exclusive with prf.
+Returns:	
+A byte string of length dkLen that can be used as key material. If you want multiple keys, just break up this string into segments of the desired length.
+
+scrypt
+scrypt is a password-based key derivation function created by Colin Percival, described in his paper “Stronger key derivation via sequential memory-hard functions” and in RFC7914.
+
+In addition to being computationally expensive, it is also memory intensive and therefore more secure against the risk of custom ASICs.
+
+Example:
+
+from Crypto.Protocol.KDF import scrypt
+from Crypto.Random import get_random_bytes
+
+password = b'my super secret'
+salt = get_random_bytes(16)
+key = scrypt(password, salt, 16, N=2**14, r=8, p=1)
+Crypto.Protocol.KDF.scrypt(password, salt, key_len, N, r, p, num_keys=1)
+Derive one or more keys from a passphrase.
+
+Parameters:	
+password (string) – The secret pass phrase to generate the keys from.
+salt (string) – A string to use for better protection from dictionary attacks. This value does not need to be kept secret, but it should be randomly chosen for each derivation. It is recommended to be at least 16 bytes long.
+key_len (integer) – The length in bytes of every derived key.
+N (integer) – CPU/Memory cost parameter. It must be a power of 2 and less than 232.
+r (integer) – Block size parameter.
+p (integer) – Parallelization parameter. It must be no greater than (232−1)/(4r).
+num_keys (integer) – The number of keys to derive. Every key is key_len bytes long. By default, only 1 key is generated. The maximum cumulative length of all keys is (232−1)∗32 (that is, 128TB).
+A good choice of parameters (N, r , p) was suggested by Colin Percival in his presentation in 2009:
+
+( 2¹⁴, 8, 1 ) for interactive logins (≤100ms)
+( 2²⁰, 8, 1 ) for file encryption (≤5s)
+Returns:	A byte string or a tuple of byte strings.
+bcrypt
+bcrypt is a password hashing function designed by Niels Provos and David Mazières.
+
+In addition to being computationally expensive, it is also memory intensive and therefore more secure against the risk of custom ASICs.
+
+This implementation only supports bcrypt hashes with prefix $2a.
+
+By design, bcrypt only accepts passwords up to 72 byte long. If you want to hash passwords with no restrictions on their length, it is common practice to apply a cryptographic hash and then BASE64-encode For instance:
+
+from base64 import b64encode
+from Crypto.Hash import SHA256
+from Crypto.Protocol.KDF import bcrypt
+
+password = b"test"
+b64pwd = b64encode(SHA256.new(password).digest())
+bcrypt_hash = bcrypt(b64pwd, 12)
+and to check them:
+
+from base64 import b64encode
+from Crypto.Hash import SHA256
+from Crypto.Protocol.KDF import bcrypt
+
+password_to_test = b"test"
+try:
+    b64pwd = b64encode(SHA256.new(password).digest())
+    bcrypt_check(b64pwd, bcrypt_hash)
+except ValueError:
+    print("Incorrect password")
+Crypto.Protocol.KDF.bcrypt(password, cost, salt=None)
+Hash a password into a key, using the OpenBSD bcrypt protocol.
+
+Parameters:	
+password (byte string or string) – The secret password or pass phrase. It must be at most 72 bytes long. It must not contain the zero byte. Unicode strings will be encoded as UTF-8.
+cost (integer) – The exponential factor that makes it slower to compute the hash. It must be in the range 4 to 31. A value of at least 12 is recommended.
+salt (byte string) – Optional. Random byte string to thwarts dictionary and rainbow table attacks. It must be 16 bytes long. If not passed, a random value is generated.
+Return (byte string):
+The bcrypt hash
+Raises:	ValueError – if password is longer than 72 bytes or if it contains the zero byte
+Crypto.Protocol.KDF.bcrypt_check(password, bcrypt_hash)
+Verify if the provided password matches the given bcrypt hash.
+
+Parameters:	
+password (byte string or string) – The secret password or pass phrase to test. It must be at most 72 bytes long. It must not contain the zero byte. Unicode strings will be encoded as UTF-8.
+bcrypt_hash (byte string, bytearray) – The reference bcrypt hash the password needs to be checked against.
+Raises:	
+ValueError – if the password does not match
+
+HKDF
+The HMAC-based Extract-and-Expand key derivation function (HKDF) was designed by Hugo Krawczyk. It is standardized in RFC 5869 and in NIST SP-800 56C.
+
+This KDF is not suitable for deriving keys from a password or for key stretching.
+
+Example, for deriving two AES256 keys:
+
+from Crypto.Protocol.KDF import HKDF
+from Crypto.Hash import SHA512
+from Crypto.Random import get_random_bytes
+
+salt = get_random_bytes(16)
+key1, key2 = HKDF(master_secret, 32, salt, SHA512, 2)
+Crypto.Protocol.KDF.HKDF(master, key_len, salt, hashmod, num_keys=1, context=None)
+Derive one or more keys from a master secret using the HMAC-based KDF defined in RFC5869.
+
+Parameters:	
+master (byte string) – The unguessable value used by the KDF to generate the other keys. It must be a high-entropy secret, though not necessarily uniform. It must not be a password.
+salt (byte string) – A non-secret, reusable value that strengthens the randomness extraction step. Ideally, it is as long as the digest size of the chosen hash. If empty, a string of zeroes in used.
+key_len (integer) – The length in bytes of every derived key.
+hashmod (module) – A cryptographic hash algorithm from Crypto.Hash. Crypto.Hash.SHA512 is a good choice.
+num_keys (integer) – The number of keys to derive. Every key is key_len bytes long. The maximum cumulative length of all keys is 255 times the digest size.
+context (byte string) – Optional identifier describing what the keys are used for.
+Returns:	
+A byte string or a tuple of byte strings.
+
+PBKDF1
+PBKDF1 is an old key derivation function defined in version 2.0 of the PKCS#5 standard (v1.5) or in RFC2898.
+
+Warning
+
+Newer applications should use the more secure and versatile scrypt instead.
+
+Crypto.Protocol.KDF.PBKDF1(password, salt, dkLen, count=1000, hashAlgo=None)
+Derive one key from a password (or passphrase).
+
+This function performs key derivation according to an old version of the PKCS#5 standard (v1.5) or RFC2898.
+
+Parameters:	
+password (string) – The secret password to generate the key from.
+salt (byte string) – An 8 byte string to use for better protection from dictionary attacks. This value does not need to be kept secret, but it should be randomly chosen for each derivation.
+dkLen (integer) – The length of the desired key. The default is 16 bytes, suitable for instance for Crypto.Cipher.AES.
+count (integer) – The number of iterations to carry out. The recommendation is 1000 or more.
+hashAlgo (module) – The hash algorithm to use, as a module or an object from the Crypto.Hash package. The digest length must be no shorter than dkLen. The default algorithm is Crypto.Hash.SHA1.
+Returns:	
+A byte string of length dkLen that can be used as key.
+
