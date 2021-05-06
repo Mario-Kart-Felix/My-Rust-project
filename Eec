@@ -1,0 +1,190 @@
+ PyCryptodome
+latest
+Search docs
+PyCryptodome
+Features
+Installation
+Compatibility with PyCrypto
+API documentation
+Crypto.Cipher package
+Crypto.Signature package
+Crypto.Hash package
+Crypto.PublicKey package
+API principles
+Available key types
+RSA
+DSA
+ECC
+Obsolete key type
+Crypto.Protocol package
+Crypto.IO package
+Crypto.Random package
+Crypto.Util package
+Examples
+Frequently Asked Questions
+Contribute and support
+Future plans
+Changelog
+License
+PyCryptodome
+Docs » API documentation » Crypto.PublicKey package » ECC
+ECC
+ECC (Elliptic Curve Cryptography) is a modern and efficient type of public key cryptography. Its security is based on the difficulty to solve discrete logarithms on the field defined by specific equations computed over a curve.
+
+ECC can be used to create digital signatures or to perform a key exchange.
+
+Compared to traditional algorithms like RSA, an ECC key is significantly smaller at the same security level. For instance, a 3072-bit RSA key takes 768 bytes whereas the equally strong NIST P-256 private key only takes 32 bytes (that is, 256 bits).
+
+This module provides mechanisms for generating new ECC keys, exporting and importing them using widely supported formats like PEM or DER.
+
+Curve	Possible identifiers
+NIST P-256	'NIST P-256', 'p256', 'P-256', 'prime256v1', 'secp256r1'
+NIST P-384	'NIST P-384', 'p384', 'P-384', 'prime384v1', 'secp384r1'
+NIST P-521	'NIST P-521', 'p521', 'P-521', 'prime521v1', 'secp521r1'
+For more information about each NIST curve see FIPS 186-4, Section D.1.2.
+
+The following example demonstrates how to generate a new ECC key, export it, and subsequently reload it back into the application:
+
+>>> from Crypto.PublicKey import ECC
+>>>
+>>> key = ECC.generate(curve='P-256')
+>>>
+>>> f = open('myprivatekey.pem','wt')
+>>> f.write(key.export_key(format='PEM'))
+>>> f.close()
+...
+>>> f = open('myprivatekey.pem','rt')
+>>> key = ECC.import_key(f.read())
+The ECC key can be used to perform or verify ECDSA signatures, using the module Crypto.Signature.DSS.
+
+classCrypto.PublicKey.ECC.EccKey(**kwargs)
+Class defining an ECC key. Do not instantiate directly. Use generate(), construct() or import_key() instead.
+
+Variables:	
+curve (string) – The name of the ECC as defined in Table 1.
+pointQ (EccPoint) – an ECC point representating the public component
+d (integer) – A scalar representating the private component
+export_key(**kwargs)
+Export this ECC key.
+
+Parameters:	
+format (string) –
+The format to use for encoding the key:
+
+'DER'. The key will be encoded in ASN.1 DER format (binary). For a public key, the ASN.1 subjectPublicKeyInfo structure defined in RFC5480 will be used. For a private key, the ASN.1 ECPrivateKey structure defined in RFC5915 is used instead (possibly within a PKCS#8 envelope, see the use_pkcs8 flag below).
+'PEM'. The key will be encoded in a PEM envelope (ASCII).
+'OpenSSH'. The key will be encoded in the OpenSSH format (ASCII, public keys only).
+passphrase (byte string or string) – The passphrase to use for protecting the private key.
+use_pkcs8 (boolean) –
+Only relevant for private keys.
+
+If True (default and recommended), the PKCS#8 representation will be used.
+
+If False, the much weaker PEM encryption mechanism will be used.
+
+protection (string) – When a private key is exported with password-protection and PKCS#8 (both DER and PEM formats), this parameter MUST be present and be a valid algorithm supported by Crypto.IO.PKCS8. It is recommended to use PBKDF2WithHMAC-SHA1AndAES128-CBC.
+compress (boolean) –
+If True, a more compact representation of the public key with the X-coordinate only is used.
+
+If False (default), the full public key will be exported.
+
+Warning
+
+If you don’t provide a passphrase, the private key will be exported in the clear!
+
+Note
+
+When exporting a private key with password-protection and PKCS#8 (both DER and PEM formats), any extra parameters to export_key() will be passed to Crypto.IO.PKCS8.
+
+Returns:	A multi-line string (for PEM and OpenSSH) or bytes (for DER) with the encoded key.
+has_private()
+True if this key can be used for making signatures or decrypting data.
+
+public_key()
+A matching ECC public key.
+
+Returns:	a new EccKey object
+classCrypto.PublicKey.ECC.EccPoint(x, y, curve='p256')
+A class to abstract a point over an Elliptic Curve.
+
+The class support special methods for:
+
+Adding two points: R = S + T
+In-place addition: S += T
+Negating a point: R = -T
+Comparing two points: if S == T: ...
+Multiplying a point by a scalar: R = S*k
+In-place multiplication by a scalar: T *= k
+Variables:	
+x (integer) – The affine X-coordinate of the ECC point
+y (integer) – The affine Y-coordinate of the ECC point
+xy – The tuple with X- and Y- coordinates
+copy()
+Return a copy of this point.
+
+double()
+Double this point (in-place operation).
+
+Return:	EccPoint : this same object (to enable chaining)
+is_point_at_infinity()
+True if this is the point-at-infinity.
+
+point_at_infinity()
+Return the point-at-infinity for the curve this point is on.
+
+size_in_bits()
+Size of each coordinate, in bits.
+
+size_in_bytes()
+Size of each coordinate, in bytes.
+
+exceptionCrypto.PublicKey.ECC.UnsupportedEccFeature
+Crypto.PublicKey.ECC.construct(**kwargs)
+Build a new ECC key (private or public) starting from some base components.
+
+Parameters:	
+curve (string) – Mandatory. It must be a curve name defined in Table 1.
+d (integer) – Only for a private key. It must be in the range [1..order-1].
+point_x (integer) – Mandatory for a public key. X coordinate (affine) of the ECC point.
+point_y (integer) – Mandatory for a public key. Y coordinate (affine) of the ECC point.
+Returns:	
+a new ECC key object
+
+Return type:	
+EccKey
+
+Crypto.PublicKey.ECC.generate(**kwargs)
+Generate a new private key on the given curve.
+
+Parameters:	
+curve (string) – Mandatory. It must be a curve name defined in Table 1.
+randfunc (callable) – Optional. The RNG to read randomness from. If None, Crypto.Random.get_random_bytes() is used.
+Crypto.PublicKey.ECC.import_key(encoded, passphrase=None)
+Import an ECC key (public or private).
+
+Parameters:	
+encoded (bytes or multi-line string) –
+The ECC key to import.
+
+An ECC public key can be:
+
+An X.509 certificate, binary (DER) or ASCII (PEM)
+An X.509 subjectPublicKeyInfo, binary (DER) or ASCII (PEM)
+An OpenSSH line (e.g. the content of ~/.ssh/id_ecdsa, ASCII)
+An ECC private key can be:
+
+In binary format (DER, see section 3 of RFC5915 or PKCS#8)
+In ASCII format (PEM or OpenSSH 6.5+)
+Private keys can be in the clear or password-protected.
+
+For details about the PEM encoding, see RFC1421/RFC1423.
+
+passphrase (byte string) – The passphrase to use for decrypting a private key. Encryption may be applied protected at the PEM level or at the PKCS#8 level. This parameter is ignored if the key in input is not encrypted.
+Returns:	
+a new ECC key object
+
+Return type:	
+EccKey
+
+Raises:	
+ValueError – when the given key cannot be parsed (possibly because the pass phrase is wrong).
