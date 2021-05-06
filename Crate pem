@@ -1,0 +1,78 @@
+[−]
+This crate provides a parser and encoder for PEM-encoded binary data. PEM-encoded binary data is essentially a beginning and matching end tag that encloses base64-encoded binary data (see: https://en.wikipedia.org/wiki/Privacy-enhanced_Electronic_Mail).
+
+This crate's documentation provides a few simple examples along with documentation on the public methods for the crate.
+
+Usage
+This crate is on crates.io and can be used by adding pem to your dependencies in your project's Cargo.toml.
+
+[dependencies]
+pem = "0.8"
+and this to your crate root:
+
+extern crate pem;
+Example: parse a single chunk of PEM-encoded text
+Generally, PEM-encoded files contain a single chunk of PEM-encoded text. Commonly, this is in some sort of a key file or an x.509 certificate.
+
+
+use pem::parse;
+
+const SAMPLE: &'static str = "-----BEGIN RSA PRIVATE KEY-----
+MIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc
+dWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO
+2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei
+AAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un
+DXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT
+TTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh
+ANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ
+-----END RSA PRIVATE KEY-----
+";
+
+ let pem = parse(SAMPLE).unwrap();
+ assert_eq!(pem.tag, "RSA PRIVATE KEY");
+Example: parse a set of PEM-encoded test
+Sometimes, PEM-encoded files contain multiple chunks of PEM-encoded text. You might see this if you have an x.509 certificate file that also includes intermediate certificates.
+
+
+use pem::parse_many;
+
+const SAMPLE: &'static str = "-----BEGIN INTERMEDIATE CERT-----
+MIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc
+dWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO
+2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei
+AAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un
+DXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT
+TTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh
+ANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ
+-----END INTERMEDIATE CERT-----
+
+-----BEGIN CERTIFICATE-----
+MIIBPQIBAAJBAOsfi5AGYhdRs/x6q5H7kScxA0Kzzqe6WI6gf6+tc6IvKQJo5rQc
+dWWSQ0nRGt2hOPDO+35NKhQEjBQxPh/v7n0CAwEAAQJBAOGaBAyuw0ICyENy5NsO
+2gkT00AWTSzM9Zns0HedY31yEabkuFvrMCHjscEF7u3Y6PB7An3IzooBHchsFDei
+AAECIQD/JahddzR5K3A6rzTidmAf1PBtqi7296EnWv8WvpfAAQIhAOvowIXZI4Un
+DXjgZ9ekuUjZN+GUQRAVlkEEohGLVy59AiEA90VtqDdQuWWpvJX0cM08V10tLXrT
+TTGsEtITid1ogAECIQDAaFl90ZgS5cMrL3wCeatVKzVUmuJmB/VAmlLFFGzK0QIh
+ANJGc7AFk4fyFD/OezhwGHbWmo/S+bfeAiIh2Ss2FxKJ
+-----END CERTIFICATE-----
+";
+
+ let pems = parse_many(SAMPLE);
+ assert_eq!(pems.len(), 2);
+ assert_eq!(pems[0].tag, "INTERMEDIATE CERT");
+ assert_eq!(pems[1].tag, "CERTIFICATE");
+Structs
+EncodeConfig	Configuration for Pem encoding
+Pem	A representation of Pem-encoded data
+Enums
+LineEnding	Enum describing line endings
+PemError	The pem error type.
+Functions
+encode	Encode a PEM struct into a PEM-encoded data string
+encode_config	Encode a PEM struct into a PEM-encoded data string with additional configuration options
+encode_many	Encode multiple PEM structs into a PEM-encoded data string
+encode_many_config	Encode multiple PEM structs into a PEM-encoded data string with additional configuration options
+parse	Parses a single PEM-encoded data from a data-type that can be dereferenced as a u8.
+parse_many	Parses a set of PEM-encoded data from a data-type that can be dereferenced as a u8.
+Type Definitions
+Result	The pem result type.
