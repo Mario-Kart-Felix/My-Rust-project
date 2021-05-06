@@ -1,0 +1,68 @@
+Signature algorithm
+The security of the ElGamal signature scheme is based (like DSA) on the discrete logarithm problem (DLP). Given a cyclic group, a generator g, and an element h, it is hard to find an integer x such that gx=h.
+
+The group is the largest multiplicative sub-group of the integers modulo p, with p prime. The signer holds a value x (0<x<p-1) as private key, and its public key (y where y=gx mod p) is distributed.
+
+The ElGamal signature is twice as big as p.
+
+Encryption algorithm
+The security of the ElGamal encryption scheme is based on the computational Diffie-Hellman problem (CDH). Given a cyclic group, a generator g, and two integers a and b, it is difficult to find the element gab when only ga and gb are known, and not a and b.
+
+As before, the group is the largest multiplicative sub-group of the integers modulo p, with p prime. The receiver holds a value a (0<a<p-1) as private key, and its public key (b where b=ga) is given to the sender.
+
+The ElGamal ciphertext is twice as big as p.
+
+Domain parameters
+For both signature and encryption schemes, the values (p,g) are called domain parameters. They are not sensitive but must be distributed to all parties (senders and receivers). Different signers can share the same domain parameters, as can different recipients of encrypted messages.
+
+Security
+Both DLP and CDH problem are believed to be difficult, and they have been proved such (and therefore secure) for more than 30 years.
+
+The cryptographic strength is linked to the magnitude of p. In 2017, a sufficient size for p is deemed to be 2048 bits. For more information, see the most recent ECRYPT report.
+
+The signature is four times larger than the equivalent DSA, and the ciphertext is two times larger than the equivalent RSA.
+
+Functionality
+This module provides facilities for generating new ElGamal keys and constructing them from known components.
+
+Crypto.PublicKey.ElGamal.generate(bits, randfunc)
+Randomly generate a fresh, new ElGamal key.
+
+The key will be safe for use for both encryption and signature (although it should be used for only one purpose).
+
+Parameters:	
+bits (int) – Key length, or size (in bits) of the modulus p. The recommended value is 2048.
+randfunc (callable) – Random number generation function; it should accept a single integer N and return a string of random N random bytes.
+Returns:	
+an ElGamalKey object
+
+Crypto.PublicKey.ElGamal.construct(tup)
+Construct an ElGamal key from a tuple of valid ElGamal components.
+
+The modulus p must be a prime. The following conditions must apply:
+
+1<g<p−1gp−1=1 mod 11<x<p−1gx=y mod p
+Parameters:	tup (tuple) –
+A tuple with either 3 or 4 integers, in the following order:
+
+Modulus (p).
+Generator (g).
+Public key (y).
+Private key (x). Optional.
+Raises:	ValueError – when the key being imported fails the most basic ElGamal validity checks.
+Returns:	an ElGamalKey object
+classCrypto.PublicKey.ElGamal.ElGamalKey(randfunc=None)
+Class defining an ElGamal key. Do not instantiate directly. Use generate() or construct() instead.
+
+Variables:	
+p – Modulus
+g – Generator
+y (integer) – Public key component
+x (integer) – Private key component
+has_private()
+Whether this is an ElGamal private key
+
+publickey()
+A matching ElGamal public key.
+
+Returns:	a new ElGamalKey object
