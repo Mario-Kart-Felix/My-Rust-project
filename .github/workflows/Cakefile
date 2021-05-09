@@ -1,0 +1,10 @@
+You can use any part of Node's API in a Cakefile, including child_process for executing commands.
+
+With child_process.spawn(), you should be able to use:
+
+task 'server', 'Start up the server', (options) ->
+  spawn = require('child_process').spawn
+  child = spawn 'coffee', [ "#{__dirname}/server" ]
+
+  child.on 'error', console.error
+  child.on 'exit', -> console.log('exit')
