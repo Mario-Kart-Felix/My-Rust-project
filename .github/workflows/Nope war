@@ -1,0 +1,14 @@
+Create a package.json for your project (see required contents or use npm init)
+Commit it along your project files, this will be your dependency tracking
+npm install will sort out and download all dependencies
+Deploying:
+
+Upload/push your files to the server
+Either send the node_modules folder along or run npm install on the server
+To use your private libraries you'll need to either upload the modules folder or publish them (see below)
+Private/local libraries:
+
+Create the library anywhere you want (e.g. ~/Projects/mylib)
+go to the mylib folder and run npm link
+go to the project's folder and run npm install mylib
+Now your local library is symlinked into your project's node_modules
