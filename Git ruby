@@ -1,0 +1,55 @@
+That's a interesting idea, though I think it might be harder than you realize to rebase an entire project history ontop of a bunch of updates.That's a interesting idea, though I think it might be harder than you realize to rebase an entire project history ontop of a bunch of updates.
+
+Here's how you could do it, in pseudo-git :-)
+
+# First fork the app template on github
+# Then clone it locally
+git clone your_fork_of_app_template_url
+
+# Setup a remote to the original repository (the one you forked from)
+git remote add original_base original_app_template_url
+
+# make a branch at the root so you have someplace to pull in new changes
+git checkout -b app_template original_base/master
+
+# go back to your master and write your app
+git checkout master
+git commit
+git commit 
+...
+
+# Then later update your app template if it has changed
+git checkout app_template
+git pull original_base
+
+# now Rebase your entire app on top of the updated template (not sure how to go about this with multiple branches like edge)
+git checkout master
+git rebase app_template
+This might work out if the app template was just a gem-file or a collection of plugins. But even then, you might be better off just merging master and app_template so you wouldn't have to rewrite your entire app history.
+
+Here's how you could do it, in pseudo-git :-)
+
+# First fork the app template on github
+# Then clone it locally
+git clone your_fork_of_app_template_url
+
+# Setup a remote to the original repository (the one you forked from)
+git remote add original_base original_app_template_url
+
+# make a branch at the root so you have someplace to pull in new changes
+git checkout -b app_template original_base/master
+
+# go back to your master and write your app
+git checkout master
+git commit
+git commit 
+...
+
+# Then later update your app template if it has changed
+git checkout app_template
+git pull original_base
+
+# now Rebase your entire app on top of the updated template (not sure how to go about this with multiple branches like edge)
+git checkout master
+git rebase app_template
+This might work out if the app template was just a gem-file or a collection of plugins. But even then, you might be better off just merging master and app_template so you wouldn't have to rewrite your entire app history.
