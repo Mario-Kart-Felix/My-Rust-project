@@ -1,0 +1,17 @@
+<template>
+       {{messageId}}
+       // other html code
+    </template>
+    
+    <script>
+       export default {
+          props: ['messageId'],
+          data: function(){
+             var theData={
+                // below line gives ReferenceError messageId is not defined
+                somevar: messageId,
+                // other object attributes
+             }
+          }
+       }
+    </script>
