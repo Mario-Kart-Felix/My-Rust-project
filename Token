@@ -1,0 +1,11 @@
+$ curl ipinfo.io/8.8.8.8/geo?token=$TOKEN
+{
+"ip": "8.8.8.8",
+"loc": "37.3859,-122.0838",
+"city": "Mountain View",
+"region": "California",
+"country": "US"
+}
+# Get just the city as plaintext
+$ curl ipinfo.io/8.8.8.8/city?token=$TOKEN
+Mountain View
