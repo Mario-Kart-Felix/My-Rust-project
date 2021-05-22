@@ -1,0 +1,6 @@
+build_foreign_language_testcases!() { /* proc-macro */ }
+A macro to build testcases for a component’s generated bindings.
+
+This macro provides some plumbing to write automated tests for the generated foreign language bindings of a component. As a component author, you can write script files in the target foreign language(s) that exercise you component API, and then call this macro to produce a cargo test testcase from each one. The generated code will execute your script file with appropriate configuration and environment to let it load the component bindings, and will pass iff the script exits successfully.
+
+To use it, invoke the macro with the udl file as the first argument, then one or more file paths relative to the crate root directory. It will produce one #[test] function per file, in a manner designed to play nicely with cargo test and its test filtering options.
