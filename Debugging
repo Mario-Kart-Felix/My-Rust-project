@@ -1,0 +1,2099 @@
+Tenderlove Making
+Debugging an Assertion Error in Ruby
+2021-02-03 @ 17:13
+I hope nobody runs in to a problem where they need the information in this post, but in case you do, I hope this post is helpful. (I’m talking to you, future Aaron! lol)
+
+I committed a patch to Ruby that caused the tests to start failing. This was the patch:
+
+commit 1be84e53d76cff30ae371f0b397336dee934499d
+Author: Aaron Patterson <tenderlove@ruby-lang.org>
+Date:   Mon Feb 1 10:42:13 2021 -0800
+
+    Don't pin `val` passed in to `rb_define_const`.
+    
+    The caller should be responsible for holding a pinned reference (if they
+    need that)
+
+diff --git a/variable.c b/variable.c
+index 92d7d11eab..ff4f7964a7 100644
+--- a/variable.c
++++ b/variable.c
+@@ -3154,7 +3154,6 @@ rb_define_const(VALUE klass, const char *name, VALUE val)
+     if (!rb_is_const_id(id)) {
+        rb_warn("rb_define_const: invalid name `%s' for constant", name);
+     }
+-    rb_gc_register_mark_object(val);
+     rb_const_set(klass, id, val);
+ }
+This patch is supposed to allow objects passed in to rb_define_const to move. As the commit message says, the caller should be responsible for keeping the value pinned. At the time I committed the patch, I thought that most callers of the function were marking the value passed in (as val), so we were pinning objects that something else would already pin. In other words, this code was being wasteful by chewing up GC time by pinning objects that were already pinned.
+
+Unfortunately the CI started to error shortly after I committed this patch. Clearly the patch was related, but how?
+
+In this post I am going to walk through the debugging tricks I used to find the error.
+
+Reproduction
+I was able to reproduce the error on my Linux machine by running the same command CI ran. Unfortunately since this bug is related to GC, the error was intermittent. To reproduce it, I just ran the tests in a loop until the process crashed like this:
+
+$ while test $status -eq 0
+    env RUBY_TESTOPTS='-q --tty=no' make -j16 -s check
+  end
+Before running this loop though, I made sure to do ulimit -c unlimited so that I would get a core file when the process crashed.
+
+The Error
+After the process crashed, the top of the error looked like this:
+
+<OBJ_INFO:rb_ractor_confirm_belonging@./ractor_core.h:327> 0x000055be8657f180 [0     ] T_NONE 
+/home/aaron/git/ruby/lib/bundler/environment_preserver.rb:47: [BUG] id == 0 but not shareable
+ruby 3.1.0dev (2021-02-03T17:35:37Z master 6b4814083b) [x86_64-linux]
+
+The Ractor verification routines crashed the process because a T_NONE object is “not sharable”. In other words you can’t share an object of type T_NONE between Ractors. This makes sense because T_NONE objects are actually empty slots in the GC. If a Ractor, or any other Ruby code sees a T_NONE object, then it’s clearly an error. Only the GC internals should ever be dealing with this type.
+
+The top of the C backtrace looked like this:
+
+-- C level backtrace information -------------------------------------------
+/home/aaron/git/ruby/ruby(rb_print_backtrace+0x14) [0x55be856e9816] vm_dump.c:758
+/home/aaron/git/ruby/ruby(rb_vm_bugreport) vm_dump.c:1020
+/home/aaron/git/ruby/ruby(bug_report_end+0x0) [0x55be854e2a69] error.c:778
+/home/aaron/git/ruby/ruby(rb_bug_without_die) error.c:778
+/home/aaron/git/ruby/ruby(rb_bug+0x7d) [0x55be854e2bb0] error.c:786
+/home/aaron/git/ruby/ruby(rb_ractor_confirm_belonging+0x102) [0x55be856cf6e2] ./ractor_core.h:328
+/home/aaron/git/ruby/ruby(vm_exec_core+0x4ff3) [0x55be856b0003] vm.inc:2224
+/home/aaron/git/ruby/tool/lib/test/unit/parallel.rb(rb_vm_exec+0x886) [0x55be856c9946]
+/home/aaron/git/ruby/ruby(load_iseq_eval+0xbb) [0x55be8554f66b] load.c:594
+/home/aaron/git/ruby/ruby(require_internal+0x394) [0x55be8554e3e4] load.c:1065
+/home/aaron/git/ruby/ruby(rb_require_string+0x973c4) [0x55be8554d8a4] load.c:1142
+/home/aaron/git/ruby/ruby(rb_f_require) load.c:838
+/home/aaron/git/ruby/ruby(vm_call_cfunc_with_frame+0x11a) [0x55be856dd6fa] ./vm_insnhelper.c:2897
+/home/aaron/git/ruby/ruby(vm_call_method_each_type+0xaa) [0x55be856d4d3a] ./vm_insnhelper.c:3387
+/home/aaron/git/ruby/ruby(vm_call_alias+0x87) [0x55be856d68e7] ./vm_insnhelper.c:3037
+/home/aaron/git/ruby/ruby(vm_sendish+0x200) [0x55be856d08e0] ./vm_insnhelper.c:4498
+The function rb_ractor_confirm_belonging was the function raising an exception.
+
+Debugging the Core File with LLDB
+I usually use clang / lldb when debugging. I’ve added scripts to Ruby’s lldb tools that let me track down problems more easily, so I prefer it over gcc / gdb.
+
+First I inspected the backtrace in the corefile:
+
+(lldb) target create "./ruby" --core "core.456156"
+Core file '/home/aaron/git/ruby/core.456156' (x86_64) was loaded.
+(lldb) bt
+* thread #1, name = 'ruby', stop reason = signal SIGABRT
+  * frame #0: 0x00007fdc5fc8918b libc.so.6`raise + 203
+    frame #1: 0x00007fdc5fc68859 libc.so.6`abort + 299
+    frame #2: 0x000056362ac38bc6 ruby`die at error.c:765:5
+    frame #3: 0x000056362ac38bb5 ruby`rb_bug(fmt=<unavailable>) at error.c:788:5
+    frame #4: 0x000056362ae256e2 ruby`rb_ractor_confirm_belonging(obj=<unavailable>) at ractor_core.h:328:13
+    frame #5: 0x000056362ae06003 ruby`vm_exec_core(ec=<unavailable>, initial=<unavailable>) at vm.inc:2224:5
+    frame #6: 0x000056362ae1f946 ruby`rb_vm_exec(ec=<unavailable>, mjit_enable_p=<unavailable>) at vm.c:0
+    frame #7: 0x000056362aca566b ruby`load_iseq_eval(ec=0x000056362b176710, fname=0x000056362ce96660) at load.c:594:5
+    frame #8: 0x000056362aca43e4 ruby`require_internal(ec=<unavailable>, fname=<unavailable>, exception=1) at load.c:1065:21
+    frame #9: 0x000056362aca38a4 ruby`rb_f_require [inlined] rb_require_string(fname=0x00007fdc38033178) at load.c:1142:18
+    frame #10: 0x000056362aca3880 ruby`rb_f_require(obj=<unavailable>, fname=0x00007fdc38033178) at load.c:838
+    frame #11: 0x000056362ae336fa ruby`vm_call_cfunc_with_frame(ec=0x000056362b176710, reg_cfp=0x00007fdc5f958de0, calling=<unavailable>) at vm_insnhelper.c:2897:11
+    frame #12: 0x000056362ae2ad3a ruby`vm_call_method_each_type(ec=0x000056362b176710, cfp=0x00007fdc5f958de0, calling=0x00007ffe3b552128) at vm_insnhelper.c:3387:16
+    frame #13: 0x000056362ae2c8e7 ruby`vm_call_alias(ec=0x000056362b176710, cfp=0x00007fdc5f958de0, calling=0x00007ffe3b552128) at vm_insnhelper.c:3037:12
+It’s very similar to the backtrace in the crash report. The first thing that was interesting to me was frame 5 in vm_exec_core. vm_exec_core is the main loop for the YARV VM. This program was crashing when executing some kind of instruction in the virtual machine.
+
+(lldb) f 5
+frame #5: 0x000056362ae06003 ruby`vm_exec_core(ec=<unavailable>, initial=<unavailable>) at vm.inc:2224:5
+   2221	    /* ### Instruction trailers. ### */
+   2222	    CHECK_VM_STACK_OVERFLOW_FOR_INSN(VM_REG_CFP, INSN_ATTR(retn));
+   2223	    CHECK_CANARY(leaf, INSN_ATTR(bin));
+-> 2224	    PUSH(val);
+   2225	    if (leaf) ADD_PC(INSN_ATTR(width));
+   2226	#   undef INSN_ATTR
+   2227	
+(lldb) 
+Checking frame 5, we can see that it’s crashing when we push a value on to the stack. The Ractor function checks the value of objects being pushed on the VM stack, and in this case we have an object that is a T_NONE. The question is where did this value come from?
+
+The crash happened in the file vm.inc, line 2224. This file is a generated file, so I can’t link to it, but I wanted to know which instruction was being executed, so I pulled up that file.
+
+Line 2224 happened to be inside the opt_send_without_block instruction. So something is calling a method, and the return value of the method is a T_NONE object.
+
+But what method is being called, and on what object?
+
+Finding the called method
+The value ec, or “Execution Context” contains information about the virtual machine at runtime. On the ec, we can find the cfp or “Control Frame Pointer” which is a data structure representing the current executing stack frame. In lldb, I could see that frame 7 had the ec available, so I went to that frame to look at the cfp:
+
+(lldb) f 7
+frame #7: 0x000056362aca566b ruby`load_iseq_eval(ec=0x000056362b176710, fname=0x000056362ce96660) at load.c:594:5
+   591 	        rb_ast_dispose(ast);
+   592 	    }
+   593 	    rb_exec_event_hook_script_compiled(ec, iseq, Qnil);
+-> 594 	    rb_iseq_eval(iseq);
+   595 	}
+   596 	
+   597 	static inline enum ruby_tag_type
+(lldb) p *ec->cfp
+(rb_control_frame_t) $1 = {
+  pc = 0x000056362c095d58
+  sp = 0x00007fdc5f859330
+  iseq = 0x000056362ca051f0
+  self = 0x000056362b1d92c0
+  ep = 0x00007fdc5f859328
+  block_code = 0x0000000000000000
+  __bp__ = 0x00007fdc5f859330
+}
+The control frame pointer has a pointer to the iseq or “Instruction Sequence” that is currently being executed. It also has a pc or “Program Counter”, and the program counter usually points at the instruction that will be executed next (in other words, not the currently executing instruction). Of other interest, the iseq also has the source location that corresponds to those instructions.
+
+Getting the Source File
+If we examine the iseq structure, we can find the source location of the code that is currently being executed:
+
+(lldb) p ec->cfp->iseq->body->location
+(rb_iseq_location_t) $4 = {
+  pathobj = 0x000056362ca06960
+  base_label = 0x000056362ce95a30
+  label = 0x000056362ce95a30
+  first_lineno = 0x0000000000000051
+  node_id = 137
+  code_location = {
+    beg_pos = (lineno = 40, column = 4)
+    end_pos = (lineno = 50, column = 7)
+  }
+}
+(lldb) command script import -r ~/git/ruby/misc/lldb_cruby.py
+lldb scripts for ruby has been installed.
+(lldb) rp 0x000056362ca06960
+bits [     ]
+T_STRING: [FROZEN] (const char [57]) $6 = "/home/aaron/git/ruby/lib/bundler/environment_preserver.rb"
+(lldb) 
+The location info clearly shows us that the instructions are on line 40. The pathobj member contains the file name, but it is stored as a Ruby string. To print out the string, I imported the lldb CRuby extensions, then used the rp command and gave it the address of the path object.
+
+From the output, we can see that it’s crashing in the “environment_preserver.rb” file inside of the instructions that are defined on line 40. We’re not crashing on line 40, but the instructions are defined there.
+
+Those instructions are this method:
+
+    def replace_with_backup
+      ENV.replace(backup) unless Gem.win_platform?
+
+      # Fallback logic for Windows below to workaround
+      # https://bugs.ruby-lang.org/issues/16798. Can be dropped once all
+      # supported rubies include the fix for that.
+
+      ENV.clear
+
+      backup.each {|k, v| ENV[k] = v }
+    end
+It’s still not clear which of these method calls is breaking. In this function we have some method call that is returning a T_NONE.
+
+Finding The Method Call
+To find the method call, I disassembled the instruction sequence and checked the program counter:
+
+(lldb) command script import -r misc/lldb_disasm.py
+lldb Ruby disasm installed.
+(lldb) rbdisasm ec->cfp->iseq
+PC             IDX  insn_name(operands) 
+0x56362c095c20 0000 opt_getinlinecache( 6, (struct iseq_inline_cache_entry *)0x56362c095ee0 )
+0x56362c095c38 0003 putobject( (VALUE)0x14 )
+0x56362c095c48 0005 getconstant( ID: 0x807b )
+0x56362c095c58 0007 opt_setinlinecache( (struct iseq_inline_cache_entry *)0x56362c095ee0 )
+0x56362c095c68 0009 opt_send_without_block( (struct rb_call_data *)0x56362c095f20 )
+0x56362c095c78 0011 branchif( 15 )
+0x56362c095c88 0013 opt_getinlinecache( 6, (struct iseq_inline_cache_entry *)0x56362c095ef0 )
+0x56362c095ca0 0016 putobject( (VALUE)0x14 )
+0x56362c095cb0 0018 getconstant( ID: 0x370b )
+0x56362c095cc0 0020 opt_setinlinecache( (struct iseq_inline_cache_entry *)0x56362c095ef0 )
+0x56362c095cd0 0022 putself
+0x56362c095cd8 0023 opt_send_without_block( (struct rb_call_data *)0x56362c095f30 )
+0x56362c095ce8 0025 opt_send_without_block( (struct rb_call_data *)0x56362c095f40 )
+0x56362c095cf8 0027 pop
+0x56362c095d00 0028 opt_getinlinecache( 6, (struct iseq_inline_cache_entry *)0x56362c095f00 )
+0x56362c095d18 0031 putobject( (VALUE)0x14 )
+0x56362c095d28 0033 getconstant( ID: 0x370b )
+0x56362c095d38 0035 opt_setinlinecache( (struct iseq_inline_cache_entry *)0x56362c095f00 )
+0x56362c095d48 0037 opt_send_without_block( (struct rb_call_data *)0x56362c095f50 )
+0x56362c095d58 0039 pop
+0x56362c095d60 0040 putself
+0x56362c095d68 0041 opt_send_without_block( (struct rb_call_data *)0x56362c095f60 )
+0x56362c095d78 0043 send( (struct rb_call_data *)0x56362c095f70, (rb_iseq_t *)0x56362ca05178 )
+0x56362c095d90 0046 leave
+(lldb) p ec->cfp->pc
+(const VALUE *) $9 = 0x000056362c095d58
+First I loaded the disassembly helper script. It provides the rbdisasm function. Then I used rbdisasm on the instruction sequence. This printed out the instructions in mostly human readable form. Printing the PC showed a value of 0x000056362c095d58. Looking at the PC list in the disassembly shows that 0x000056362c095d58 corresponds to a pop instruction. But the PC always points at the next instruction that will execute, not the currently executing instruction. The currently executing instruction is the one right before the PC. In this case we can see it is opt_send_without_block, which lines up with the information we discovered from vm.inc.
+
+This is the 3rd from last method call in the block. At 0041 there is another opt_send_without_block, and then at 0043 there is a generic send call.
+
+Looking at the Ruby code, from the bottom of the method, we see a call to backup. It’s not a local variable, so it must be a method call. The code calls each on that, and each takes a block. These must correspond to the opt_send_without_block and the send at the end of the instruction sequence. Our crash is happening just before these two, so it must be the call to ENV.clear.
+
+If we read the implementation of ENV.clear, we can see that it returns a global variable called envtbl:
+
+VALUE
+rb_env_clear(void)
+{
+    VALUE keys;
+    long i;
+
+    keys = env_keys(TRUE);
+    for (i=0; i<RARRAY_LEN(keys); i++) {
+        VALUE key = RARRAY_AREF(keys, i);
+        const char *nam = RSTRING_PTR(key);
+        ruby_setenv(nam, 0);
+    }
+    RB_GC_GUARD(keys);
+    return envtbl;
+}
+This object is allocated here:
+
+    envtbl = rb_obj_alloc(rb_cObject);
+And then it calls rb_define_global_const to define the ENV constant as a global:
+
+    /*
+     * ENV is a Hash-like accessor for environment variables.
+     *
+     * See ENV (the class) for more details.
+     */
+    rb_define_global_const("ENV", envtbl);
+If we read rb_define_global_const we can see that it just calls rb_define_const:
+
+void
+rb_define_global_const(const char *name, VALUE val)
+{
+    rb_define_const(rb_cObject, name, val);
+}
+Before my patch, any object passed to rb_define_const would be pinned. Once I removed the pinning, that allowed the ENV variable to move around even though it shouldn’t.
+
+I reverted that patch here, and then sent a pull request to make rb_gc_register_mark_object a little bit smarter here.
+
+Conclusion
+TBH I don’t know what to conclude this with. Debugging errors kind of sucks, but I hope that the LLDB scripts I wrote make it suck a little less. Hope you’re having a good day!!!
+
+read more »
+Counting Write Barrier Unprotected Objects
+2020-08-26 @ 15:29
+This is just a quick post mostly as a note to myself (because I forget the jq commands). Ruby objects that are not protected with a write barrier must be examined on every minor GC. That means that any objects in your system that live for a long time and don’t have write barrier protection will cause unnecessary overhead on every minor collection.
+
+Heap dumps will tell you which objects have a write barrier. In Rails apps I use a small script to get a dump of the heap after boot:
+
+require 'objspace'
+require 'config/environment'
+
+GC.start
+
+File.open("heap.dump", "wb") do |f|
+  ObjectSpace.dump_all(output: f)
+end
+The heap.dump file will have a list of all of the objects in the heap.
+
+Here is an example of an object with a write barrier:
+
+{"address":"0x7fec1b2ff940", "type":"IMEMO", "class":"0x7fec1b2ffd50", "imemo_type":"ment", "references":["0x7fec1b314908", "0x7fec1b2ffcd8"], "memsize":48, "flags":{"wb_protected":true, "old":true, "uncollectible":true, "marked":true}}
+Here is an example of an object without a write barrier:
+
+{"address":"0x7fec1b2ff760", "type":"ICLASS", "class":"0x7fec1a8c0f60", "references":["0x7fec1a8c9250", "0x7fec1b2fefe0"], "memsize":40}
+Objects with a write barrier will have "wb_protected":true in their flags section.
+
+I like to use jq to process heap dumps. Here is a command to find all of the unprotected objects, group them by type, then count them up:
+
+$ jq 'select(.flags.wb_protected | not) | .type' heap.dump  | sort | uniq -c | sort -n
+   1 "MATCH"
+   2 "ARRAY"
+   5 "ROOT"
+   9 "FILE"
+ 323 "MODULE"
+ 927 "ICLASS"
+1631 "DATA"
+All of the objects listed here will be examined on every minor GC. If my Rails app is spending a lot of time in minor GCs, this is a good place to look.
+
+Ruby 2.8 (or 3.0) will eliminate ICLASS from this list (here is the commit).
+
+read more »
+Guide to String Encoding in Ruby
+2020-01-13 @ 06:00
+Encoding issues don’t seem to happen frequently, but that is a blessing and a curse. It’s great not to fix them very frequently, but when you do need to fix them, lack of experience can leave you feeling lost.
+
+This post is meant to be a sort of guide about what to do when you encounter different types of encoding errors in Ruby. First we’ll cover what an encoding object is, then we’ll look at common encoding exceptions and how to fix them.
+
+What are String encodings in Ruby?
+In Ruby, strings are a combination of an array of bytes, and an encoding object. We can access the encoding object on the string by calling encoding on the string object.
+
+For example:
+
+>> x = 'Hello World'
+>> x.encoding
+=> #<Encoding:UTF-8>
+In my environment, the default encoding object associated with a string us the “UTF-8” encoding object. A graph of the object relationship looks something like this:
+
+string points at encoding
+
+Changing a String’s Encoding
+We can change encoding by two different methods:
+
+String#force_encoding
+String#encode
+The force_encoding method will mutate the string object and only change which encoding object the string points to. It does nothing to the bytes of the string, it merely changes the encoding object associated with the string. Here we can see that the return value of encoding changes after we call the force_encode method:
+
+>> x = 'Hello World'
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.force_encoding "US-ASCII"
+=> "Hello World"
+>> x.encoding
+=> #<Encoding:US-ASCII>
+The encode method will create a new string based on the bytes of the old string and associate the encoding object with the new string.
+
+Here we can see that the encoding of x remains the same, and calling encode returns a new string y which is associated with the new encoding:
+
+>> x = 'Hello World'
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> y = x.encode("US-ASCII")
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> y.encoding
+=> #<Encoding:US-ASCII>
+Here is a visualization of the difference:
+
+changing encoding
+
+Calling force_encoding mutates the original string, where encode creates a new string with a different encoding. Translating a string from one encoding to another is probably the “normal” use of encodings. However, developers will rarely call the encode method because Ruby will typically handle any necessary translations automatically. It’s probably more common to call the force_encoding method, and that is because strings can be associated with the wrong encoding.
+
+Strings Can Have the Wrong Encoding
+Strings can be associated with the wrong encoding object, and that is the source of most if not all encoding related exceptions. Let’s look at an example:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.valid_encoding?
+=> false
+In this case, Ruby associated the string "Hello \x93\xfa\x96\x7b" with the default encoding UTF-8. However, many of the bytes in the string are not valid Unicode characters. We can check if the string is associated with a valid encoding object by calling valid_encoding? method. The valid_encoding? method will scan all bytes to see if they are valid for that particular encoding object.
+
+So how do we fix this? The answer depends on the situation. We need to think about where the data came from and where the data is going. Let’s say we’ll display this string on a webpage, but we do not know the correct encoding for the string. In that case we probably want to make sure the string is valid UTF-8, but since we don’t know the correct encoding for the string, our only choice is to remove the bad bytes from the string.
+
+We can remove the unknown bytes by using the scrub method:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.valid_encoding?
+=> false
+>> y = x.scrub
+>> y
+=> "Hello ���{"
+>> y.encoding
+=> #<Encoding:UTF-8>
+>> y.valid_encoding?
+=> true
+The scrub method will return a new string associated with the encoding but with all of the invalid bytes replaced by a replacement character, the diamond question mark thing.
+
+What if we do know the encoding of the source string? Actually the example above is using a string that’s encoding using Shift JIS. Let’s say we know the encoding, and we want to display the string on a webpage. In that case we tag the string by using force_encoding, and transcode to UTF-8:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.force_encoding "Shift_JIS"
+=> "Hello \x{93FA}\x{967B}"
+>> x.valid_encoding?
+=> true
+>> x.encode "UTF-8" # display as UTF-8
+=> "Hello 日本"
+The most important thing to think about when dealing with encoding issues is “where did this data come from?” and “what will we do with this data?” Answering those two questions will drive all decisions about which encoding to use with which string.
+
+Encoding Depends on the Context
+Before we look at some common errors and their remediation, let’s look at one more example of the encoding context dependency. In this example, we’ll use some user input as a cache key, but we’ll also display the user input on a webpage. We’re going to use our source data (the user input) in two places: as a cache key, and something to display on a web page.
+
+Here’s the code:
+
+require "digest/md5"
+require "cgi"
+
+# Make a checksum
+def make_checksum string
+  Digest::MD5.hexdigest string
+end
+
+# Not good HTML escaping (don't use this)
+# Returns a string with UTF-8 compatible encoding for display on a webpage
+def display_on_web string
+  string.gsub(/>/, "&gt;")
+end
+
+# User input from an unknown source
+x = "Hello \x93\xfa\x96\x7b"
+p ENCODING: x.encoding
+p VALID_ENCODING: x.valid_encoding?
+
+p display_on_web x
+p make_checksum x
+If we run this code, we’ll get an exception:
+
+$ ruby thing.rb
+{:ENCODING=>#<Encoding:UTF-8>}
+{:VALID_ENCODING=>false}
+Traceback (most recent call last):
+        2: from thing.rb:20:in `<main>'
+        1: from thing.rb:12:in `display_on_web'
+thing.rb:12:in `gsub': invalid byte sequence in UTF-8 (ArgumentError)
+The problem is that we have a string of unknown input with bytes that are not valid UTF-8 characters. We know we want to display this string on a UTF-8 encoded webpage, so lets scrub the string:
+
+require "digest/md5"
+require "cgi"
+
+# Make a checksum
+def make_checksum string
+  Digest::MD5.hexdigest string
+end
+
+# Not good HTML escaping (don't use this)
+# Returns a string with UTF-8 compatible encoding for display on a webpage
+def display_on_web string
+  string.gsub(/>/, "&gt;")
+end
+
+# User input from an unknown source
+x = "Hello \x93\xfa\x96\x7b".scrub
+p ENCODING: x.encoding
+p VALID_ENCODING: x.valid_encoding?
+
+p display_on_web x
+p make_checksum x
+Now when we run the program, the output is like this:
+
+$ ruby thing.rb
+{:ENCODING=>#<Encoding:UTF-8>}
+{:VALID_ENCODING=>true}
+"Hello ���{"
+"4dab6f63b4d3ae3279345c9df31091eb"
+Great! We’ve build some HTML and generated a checksum. Unfortunately there is a bug in this code (of course the mere fact that we’ve written code means there’s a bug! lol) Let’s introduce a second user input string with slightly different bytes than the first input string:
+
+require "digest/md5"
+require "cgi"
+
+# Make a checksum
+def make_checksum string
+  Digest::MD5.hexdigest string
+end
+
+# Not good HTML escaping (don't use this)
+# Returns a string with UTF-8 compatible encoding for display on a webpage
+def display_on_web string
+  string.gsub(/>/, "&gt;")
+end
+
+# User input from an unknown source
+x = "Hello \x93\xfa\x96\x7b".scrub
+p ENCODING: x.encoding
+p VALID_ENCODING: x.valid_encoding?
+
+p display_on_web x
+p make_checksum x
+
+# Second user input from an unknown source with slightly different bytes
+y = "Hello \x94\xfa\x97\x7b".scrub
+p ENCODING: y.encoding
+p VALID_ENCODING: y.valid_encoding?
+
+p display_on_web y
+p make_checksum y
+Here is the output from the program:
+
+$ ruby thing.rb
+{:ENCODING=>#<Encoding:UTF-8>}
+{:VALID_ENCODING=>true}
+"Hello ���{"
+"4dab6f63b4d3ae3279345c9df31091eb"
+{:ENCODING=>#<Encoding:UTF-8>}
+{:VALID_ENCODING=>true}
+"Hello ���{"
+"4dab6f63b4d3ae3279345c9df31091eb"
+The program works in the sense that there is no exception. But both user input strings have the same checksum despite the fact that the original strings clearly have different bytes! So what is the correct fix for this program? Again, we need to think about the source of the data (where did it come from), as well as what we will do with it (where it is going). In this case we have one source, from a user, and the user provided us with no encoding information. In other words, the encoding information of the source data is unknown, so we can only treat it as a sequence of bytes. We have two output cases, one is a UTF-8 HTML the other output is the input to our checksum function. The HTML requires that our string be UTF-8 so making the string valid UTF-8, in other words “scrubbing” it, before displaying makes sense. However, our checksum function requires seeing the original bytes of the string. Since the checksum is only concerned with the bytes in the string, any encoding including an invalid encoding will work. It’s nice to make sure all our strings have valid encodings though, so we’ll fix this example such that everything has a valid encoding.
+
+require "digest/md5"
+require "cgi"
+
+# Make a checksum
+def make_checksum string
+  Digest::MD5.hexdigest string
+end
+
+# Not good HTML escaping (don't use this)
+# Returns a string with UTF-8 compatible encoding for display on a webpage
+def display_on_web string
+  string.gsub(/>/, "&gt;")
+end
+
+# User input from an unknown source
+x = "Hello \x93\xfa\x96\x7b".b
+p ENCODING: x.encoding
+p VALID_ENCODING: x.valid_encoding?
+
+p display_on_web x.encode("UTF-8", undef: :replace)
+p make_checksum x
+
+# Second user input from an unknown source with slightly different bytes
+y = "Hello \x94\xfa\x97\x7b".b
+p ENCODING: y.encoding
+p VALID_ENCODING: y.valid_encoding?
+
+p display_on_web y.encode("UTF-8", undef: :replace)
+p make_checksum y
+Here is the output of the program:
+
+$ ruby thing.rb
+{:ENCODING=>#<Encoding:ASCII-8BIT>}
+{:VALID_ENCODING=>true}
+"Hello ���{"
+"96cf6db2750fd4d2488fac57d8e4d45a"
+{:ENCODING=>#<Encoding:ASCII-8BIT>}
+{:VALID_ENCODING=>true}
+"Hello ���{"
+"b92854c0db4f2c2c20eff349a9a8e3a0"
+To fix our program, we’ve changed a couple things. First we tagged the string of unknown encoding as “binary” by using the .b method. The .b method returns a new string that is associated with the ASCII-8BIT encoding. The name ASCII-8BIT is somewhat confusing because it has the word “ASCII” in it. It’s better to think of this encoding as either “unknown” or “binary data”. Unknown meaning we have some data that may have a valid encoding, but we don’t know what it is. Or binary data, as in the bytes read from a JPEG file or some such binary format. Anyway, we pass the binary string in to the checksum function because the checksum only cares about the bytes in the string, not about the encoding.
+
+The second change we made is to call encode with the encoding we want (UTF-8) along with undef: :replace meaning that any time Ruby encounters bytes it doesn’t know how to convert to the target encoding, it will replace them with the replacement character (the diamond question thing).
+
+SIDE NOTE: This is probably not important, but it is fun! We can specify what Ruby uses for replacing unknown bytes. Here’s an example:
+
+>> x = "Hello \x94\xfa\x97\x7b".b
+>> x.encoding
+=> #<Encoding:ASCII-8BIT>
+>> x.encode("UTF-8", undef: :replace, replace: "Aaron")
+=> "Hello AaronAaronAaron{"
+>> x.encode("UTF-8", undef: :replace, replace: "🤣")
+=> "Hello 🤣🤣🤣{"
+>> [_.encoding, _.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+Now lets take a look at some common encoding errors in Ruby and what to do about them.
+
+Encoding::InvalidByteSequenceError
+This exception occurs when Ruby needs to examine the bytes in a string and the bytes do not match the encoding. Here is an example of this exception:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.encode "UTF-16"
+Traceback (most recent call last):
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        3: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        2: from (irb):4
+        1: from (irb):4:in `encode'
+Encoding::InvalidByteSequenceError ("\x93" on UTF-8)
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.valid_encoding?
+=> false
+The string x contains bytes that aren’t valid UTF-8, yet it is associated with the UTF-8 encoding object. When we try to convert x to UTF-16, an exception occurs.
+
+How to fix Encoding::InvalidByteSequenceError
+Like most encoding issues, our string x is tagged with the wrong encoding. The way to fix this issue is to tag the string with the correct encoding. But what is the correct encoding? To figure out the correct encoding, you need to know where the string came from. For example if the string came from a Mime attachment, the Mime attachment should specify the encoding (or the RFC will tell you).
+
+In this case, the string is a valid Shift JIS string, but I know that because I looked up the bytes and manually entered them. So we’ll tag this as Shift JIS, and the exception goes away:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.force_encoding "Shift_JIS"
+=> "Hello \x{93FA}\x{967B}"
+>> x.encode "UTF-16"
+=> "\uFEFFHello \u65E5\u672C"
+>> x.encoding
+=> #<Encoding:Shift_JIS>
+>> x.valid_encoding?
+=> true
+If you don’t know the source of the string, an alternative solution is to tag as UTF-8 and then scrub the bytes:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.force_encoding "UTF-8"
+=> "Hello \x93\xFA\x96{"
+>> x.scrub!
+=> "Hello ���{"
+>> x.encode "UTF-16"
+=> "\uFEFFHello \uFFFD\uFFFD\uFFFD{"
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.valid_encoding?
+=> true
+Of course this works, but it means that you’ve lost data. The best solution is to figure out what the encoding of the string should be depending on its source and tag it with the correct encoding.
+
+Encoding::UndefinedConversionError
+This exception occurs when a string of one encoding can’t be converted to another encoding.
+
+Here is an example:
+
+>> x = "四\u2160"
+>> x
+=> "四Ⅰ"
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.valid_encoding?
+=> true
+>> x.encode "Shift_JIS"
+Traceback (most recent call last):
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        3: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        2: from (irb):23
+        1: from (irb):23:in `encode'
+Encoding::UndefinedConversionError (U+2160 from UTF-8 to Shift_JIS)
+In this example, we have two characters: “四”, and the Roman numeral 1 (“Ⅰ”). Unicode Roman numeral 1 cannot be converted to Shift JIS because there are two codepoints that represent that character in Shift JIS. This means the conversion is ambiguous, so Ruby will raise an exception.
+
+How to fix Encoding::UndefinedConversionError
+Our original string is correctly tagged as UTF-8, but we need to convert to Shift JIS. In this case we’ll use a replacement character when converting to Shift JIS:
+
+>> x = "四\u2160"
+>> y = x.encode("Shift_JIS", undef: :replace)
+>> y
+=> "\x{8E6C}?"
+>> y.encoding
+=> #<Encoding:Shift_JIS>
+>> y.valid_encoding?
+=> true
+>> y.encode "UTF-8"
+=> "四?"
+We were able to convert to Shift JIS, but we did lose some data.
+
+ArgumentError
+When a string contains invalid bytes, sometimes Ruby will raise an ArgumentError exception:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.downcase
+Traceback (most recent call last):
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        3: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        2: from (irb):34
+        1: from (irb):34:in `downcase'
+ArgumentError (input string invalid)
+>> x.gsub(/ello/, "i")
+Traceback (most recent call last):
+        6: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        3: from (irb):34
+        2: from (irb):35:in `rescue in irb_binding'
+        1: from (irb):35:in `gsub'
+ArgumentError (invalid byte sequence in UTF-8)
+Again we use our incorrectly tagged Shift JIS string. Calling downcase or gsub both result in an ArgumentError. I personally think these exceptions are not great. We didn’t pass anything to downcase, so why is it an ArgumentError? There is nothing wrong with the arguments we passed to gsub, so why is it an ArgumentError? Why does one say “input string invalid” where the other gives us a slightly more helpful exception of “invalid byte sequence in UTF-8”? I think these should both result in Encoding::InvalidByteSequenceError exceptions, as it’s a problem with the encoding, not the arguments.
+
+Regardless, these errors both stem from the fact that the Shift JIS string is incorrectly tagged as UTF-8.
+
+Fixing ArgumentError
+Fixing this issue is just like fixing Encoding::InvalidByteSequenceError. We need to figure out the correct encoding of the source string, then tag the source string with that encoding. If the encoding of the source string is truly unknown, scrub it.
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.force_encoding "Shift_JIS"
+=> "Hello \x{93FA}\x{967B}"
+>> x.downcase
+=> "hello \x{93FA}\x{967B}"
+>> x.gsub(/ello/, "i")
+=> "Hi \x{93FA}\x{967B}"
+Encoding::CompatibilityError
+This exception occurs when we try to combine strings of two different encodings and those encodings are incompatible. For example:
+
+>> x = "四\u2160"
+>> y = "Hello \x93\xfa\x96\x7b".force_encoding("Shift_JIS")
+>> [x.encoding, x.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+>> [y.encoding, y.valid_encoding?]
+=> [#<Encoding:Shift_JIS>, true]
+>> x + y
+Traceback (most recent call last):
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        3: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        2: from (irb):50
+        1: from (irb):50:in `+'
+Encoding::CompatibilityError (incompatible character encodings: UTF-8 and Shift_JIS)
+In this example we have a valid UTF-8 string and a valid Shift JIS string. However, these two encodings are not compatible, so we get an exception when combining.
+
+Fixing Encoding::CompatibilityError
+To fix this exception, we need to manually convert one string to a new string that has a compatible encoding. In the case above, we can choose whether we want the output string to be UTF-8 or Shift JIS, and then call encode on the appropriate string.
+
+In the case we want UTF-8 output, we can do this:
+
+>> x = "四"
+>> y = "Hello \x93\xfa\x96\x7b".force_encoding("Shift_JIS")
+>> x + y.encode("UTF-8")
+=> "四Hello 日本"
+>> [_.encoding, _.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+If we wanted Shift JIS, we could do this:
+
+>> x = "四"
+>> y = "Hello \x93\xfa\x96\x7b".force_encoding("Shift_JIS")
+>> x.encode("Shift_JIS") + y
+=> "\x{8E6C}Hello \x{93FA}\x{967B}"
+>> [_.encoding, _.valid_encoding?]
+=> [#<Encoding:Shift_JIS>, true]
+Another possible solution is to scrub bytes and concatenate, but again that results in data loss.
+
+What is a compatible encoding?
+If there are incompatible encodings, there must be compatible encodings too (at least I would think that). Here is an example of compatible encodings:
+
+>> x = "Hello World!".force_encoding "US-ASCII"
+>> [x.encoding, x.valid_encoding?]
+=> [#<Encoding:US-ASCII>, true]
+>> y = "こんにちは"
+>> [y.encoding, y.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+>> y + x
+=> "こんにちはHello World!"
+>> [_.encoding, _.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+>> x + y
+=> "Hello World!こんにちは"
+>> [_.encoding, _.valid_encoding?]
+=> [#<Encoding:UTF-8>, true]
+The x string is encoded with “US ASCII” encoding and the y string UTF-8. US ASCII is fully compatible with UTF-8, so even though these two strings have different encoding, concatenation works fine.
+
+String literals may default to UTF-8, but some functions will return US ASCII encoded strings. For example:
+
+>> require "digest/md5"
+=> true
+>> Digest::MD5.hexdigest("foo").encoding
+=> #<Encoding:US-ASCII>
+A hexdigest will only ever contain ASCII characters, so the implementation tags the returned string as US-ASCII.
+
+Encoding Gotchas
+Let’s look at a couple encoding gotcha’s.
+
+Infectious Invalid Encodings
+When a string is incorrectly tagged, Ruby will typically only raise an exception when it needs to actually examine the bytes. Here is an example:
+
+>> x = "Hello \x93\xfa\x96\x7b"
+>> x.encoding
+=> #<Encoding:UTF-8>
+>> x.valid_encoding?
+=> false
+>> x + "ほげ"
+=> "Hello \x93\xFA\x96{ほげ"
+>> y = _
+>> y
+=> "Hello \x93\xFA\x96{ほげ"
+>> [y.encoding, y.valid_encoding?]
+=> [#<Encoding:UTF-8>, false]
+Again we have the incorrectly tagged Shift JIS string. We’re able to append a correctly tagged UTF-8 string and no exception is raised. Why is that? Ruby assumes that if both strings have the same encoding, there is no reason to validate the bytes in either string so it will just append them. That means we can have an incorrectly tagged string “infect” what would otherwise be correctly tagged UTF-8 strings. Say we have some code like this:
+
+def append string
+  string + "ほげ"
+end
+
+p append("ほげ").valid_encoding? # => true
+p append("Hello \x93\xfa\x96\x7b").valid_encoding? # = false
+When debugging this code, we may be tempted to think the problem is in the append method. But actually the issue is with the caller. The caller is passing in incorrectly tagged strings, and unfortunately we might not get an exception until the return value of append is used somewhere far away.
+
+ASCII-8BIT is Special
+Sometimes ASCII-8BIT is considered to be a “compatible” encoding and sometimes it isn’t. Here is an example:
+
+>> x = "\x93\xfa\x96\x7b".b
+>> x.encoding
+=> #<Encoding:ASCII-8BIT>
+>> y = "ほげ"
+>> y + x
+Traceback (most recent call last):
+        5: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `<main>'
+        4: from /Users/aaron/.rbenv/versions/ruby-trunk/bin/irb:23:in `load'
+        3: from /Users/aaron/.rbenv/versions/ruby-trunk/lib/ruby/gems/2.7.0/gems/irb-1.2.0/exe/irb:11:in `<top (required)>'
+        2: from (irb):89
+        1: from (irb):89:in `+'
+Encoding::CompatibilityError (incompatible character encodings: UTF-8 and ASCII-8BIT)
+Here we have a binary string stored in x. Maybe it came from a JPEG file or something (it didn’t, I just typed it in!) When we try to concatenate the binary string with the UTF-8 string, we get an exception. But this may actually be an exception we want! It doesn’t make sense to be concatenating some JPEG data with an actual string we want to view, so it’s good we got an exception here.
+
+Now here is the same code, but with the contents of x changed somewhat:
+
+>> x = "Hello World".b
+>> x.encoding
+=> #<Encoding:ASCII-8BIT>
+>> y = "ほげ"
+>> y + x
+=> "ほげHello World"
+We have the same code with the same encodings at play. The only thing that changed is the actual contents of the x string.
+
+When Ruby concatenates ASCII-8BIT strings, it will examine the contents of that string. If all bytes in the string are ASCII characters, it will treat it as a US-ASCII string and consider it to be “compatible”. If the string contains non-ASCII characters, it will consider it to be incompatible.
+
+This means that if you had read some data from your JPEG, and that data happened to all be ASCII characters, you would not get an exception even though maybe you really wanted one.
+
+In my personal opinion, concatenating an ASCII-8BIT string with anything besides another ASCII-8BIT string should be an exception.
+
+Anyway, this is all I feel like writing today. I hope you have a good day, and remember to check your encodings!
+
+read more »
+My Career Goals
+2019-10-12 @ 12:40
+I was going to tweet about this, but then I thought I’d have to make a bunch of tweets, and writing a blurgh post just seemed easier. Plus I don’t really have any puns in this post, so I can’t tweet it!
+
+My Career Goals
+I think many people aren’t sure what they want to do in their career. When I first started programming, I wasn’t sure what I wanted to do with my career. But after years of experience, my career aspirations have become crystal clear. I would like my job to be:
+
+Improving Ruby and Rails internals
+Teaching people
+Improving Ruby and Rails internals
+I got my first job programming in 1999. At that time, I didn’t know I wanted to be a programmer, it was just a way for me to pay for school. It turned out that I was pretty good at programming, so I decided that would be my career. To be honest, at that time I didn’t really love programming. I just found that I was good at it, and I could make decent money. In 2005 I found Ruby and Rails and that’s when I actually learned that I love programming. I loved Ruby so much that I learned Japanese so I could read blog posts about Ruby. 14 years later, I can easily read those blog posts, but I don’t actually need them. Oops!
+
+The reason I want to work on Ruby and Rails internals is that I want the language and framework to be performant, stable, easy to use. I want Ruby and Rails to be a great choice for people to use in production. I want others to experience the same joy I felt writing Ruby, and I want to make sure there are business that will employ those people.
+
+Teaching People
+I love to teach people things I know. I also love learning new things. As I hack on language and framework internals, I try to take that knowledge an disseminate it to as many people as I can.
+
+Why?
+
+First, I don’t think people can feel the joy of programming in Ruby/Rails unless they know how to actually program with Ruby/Rails. So I’m happy to help new folks get in to the language and framework.
+
+Second, I realize I’m not going to be around forever, and I want to make sure that these technologies will outlive me. If these technologies are going to survive in to the future, people need to understand how they work. Simply put: it’s an insurance policy for the future.
+
+Third, it’s just fun.
+
+Summary
+My dream job is to hack Ruby/Rails internals and teach people everything I know. Doing it is fun for me, and it’s the best way I can use my skills to make a real impact on the world.
+
+The End.
+
+read more »
+ESP8266 and Plantower Particle Sensor
+2019-09-03 @ 08:20
+Since forest fires have started to become a normal thing in the PNW, I’ve gotten interested in monitoring the air quality in and around my house. I found some sensors that will measure PM2.5 which is a standard for measuring air quality. The sensor I’m using is a PMS5003, and you can see the data sheet for it here. I like this sensor because it supports UART, so I was able to hook it to an FTDI and read data directly from my computer. I wanted to log the data, so I hooked it up to a Raspberry PI. However, I decided I’d like to measure the air quality in my office, a second room in the house, and also outside. Buying a Raspberry Pi for every sensor I purchase seems a little unreasonable, so I investigated a different solution. I settled on the ESP8266 E-01. This part can connect to wifi, knows how to speak UART, and is powerful enough to program directly. My plan was to read data from the sensor, then broadcast the data via UDP and have a central Raspberry Pi collect the data and report on it. Unfortunately, this plan has taken me many months to execute, so I’m going to write here the stuff I wish I had known when getting started.
+
+Parts
+Here are the parts I used:
+
+ESP8266
+Plantower PMS5003
+ESP8266 Breadboard Adapter
+ESP8266 Programmer
+Wiring
+Basically I just hooked the TX / RX pins to the Plantower sensor and set the CHPD and RST pins to high.
+
+Challenges with the ESP8266
+Now I’m basically going to complain about this chip, and then I’ll post the code I used.
+
+The first issue I ran in to is that I’m not sure what to call this thing, so searching the internet became a challenge. It seems that “ESP8266” refers to the chip, but E-01 refers to the package? I’m still not actually sure. It seems there are several boards that have an ESP8266 mounted on them, but searching for ESP8266 with E01 seemed to work.
+
+The second issue is programming the chip. I prefer to use C when developing for embedded systems, but no matter how hard I tried, I could not get the native toolchain running on MacOS. Finally I gave up and just used the Arduino toolchain. Somehow, you can write programs for the ESP8266 in Arduino, but doing it in C seems impossible (on Mac anyway).
+
+Building a circuit to program the chip seems impossible. I found some schematics online for building a programmer, but I couldn’t get anything to work. Instead, I ended up buying a dedicated programmer, and it seems to work well.
+
+Power requirements are extremely finicky. The chip wants 3.3v and at times 400mA. If either of these criteria aren’t met, the chip won’t work. Sometimes the chip wouldn’t do anything. Sometimes it would start, but when it tried to do wifi it would just restart. I ended up connecting a dedicated power supply to get the right power requirements.
+
+The ESP8266 E-01 is not breadboard friendly. I ended up buying some breadboard adapters so I could prototype.
+
+CHPD and RST need to be pulled HIGH for the chip to boot. This got me for a long time. I was able to program the chip with the programmer, but as soon as I moved it to the breadboard, nothing worked. In order to get the chip to actually boot, both CHPD and RST need to be pulled high.
+
+The air quality sensor is 5v. This isn’t too much of a problem, just kind of annoying that I really really have to use two different voltages for this task.
+
+Picture
+Here is a picture of the breadboard setup I have now:
+
+ESP8266 and Plantower on a Breadboard
+
+The blue box on the right is the air quality sensor, in the middle on the breadboard is the ESP8266, and up top is the power supply.
+
+Code
+Here is the Arduino code I used:
+
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#include <ESP8266WiFiMulti.h>
+#include <base64.h>
+
+#ifndef STASSID
+#define STASSID "WifiAPName"
+#define STAPSK  "WifiPassword"
+#endif
+
+const char* ssid     = STASSID;
+const char* password = STAPSK;
+
+ESP8266WiFiMulti WiFiMulti;
+WiFiUDP udp;
+IPAddress broadcastIp(224, 0, 0, 1);
+
+byte inputString[32];
+int i = 0;
+int recordId = 0;
+
+void setup() {
+  Serial.begin(9600);
+
+  WiFi.mode(WIFI_STA);
+  WiFiMulti.addAP(ssid, password);
+
+  while (WiFiMulti.run() != WL_CONNECTED) {
+    delay(500);
+  }
+
+  delay(500);
+}
+
+void loop() {
+  while (Serial.available()) {
+    inputString[i] = Serial.read();
+    i++;
+    if (i == 2) { // Check for start of packet
+      if (!(inputString[0] == 0x42 && inputString[1] == 0x4d)) {
+        i = 0;
+      }
+    }
+    if (i == 32) {
+      i = 0;
+      String encoded = base64::encode(inputString, 32);
+      udp.beginPacketMulticast(broadcastIp, 9000, WiFi.localIP());
+      udp.print("[\"aq\",{\"mac\":\"");
+      udp.print(WiFi.macAddress());
+      udp.print("\",\"record_id\":");
+      udp.print(recordId);
+      udp.print(",\"record\":\"");
+      udp.print(encoded);
+      udp.print("\"}]");
+      udp.endPacket();
+      recordId++;
+    }
+  }
+}
+I haven’t added CRC checking in this code, but it seems to work fine. Basically it reads data from the AQ sensor, Base64 encodes the data, then broadcasts the info as JSON over UDP on my network.
+
+Here is the client code:
+
+require "socket"
+require "ipaddr"
+require "json"
+
+MULTICAST_ADDR = "224.0.0.1"
+BIND_ADDR = "0.0.0.0"
+PORT = 9000
+
+if_addr = Socket.getifaddrs.find { |s| s.addr.ipv4? && !s.addr.ipv4_loopback? }
+p if_addr.addr.ip_address
+
+socket = UDPSocket.new
+membership = IPAddr.new(MULTICAST_ADDR).hton + IPAddr.new(BIND_ADDR).hton
+
+socket.setsockopt(:IPPROTO_IP, :IP_ADD_MEMBERSHIP, membership)
+socket.setsockopt(:IPPROTO_IP, :IP_MULTICAST_TTL, 1)
+socket.setsockopt(:SOL_SOCKET, :SO_REUSEPORT, 1)
+
+socket.bind(BIND_ADDR, PORT)
+
+class Sample < Struct.new(:time,
+                          :pm1_0_standard, :pm2_5_standard, :pm10_standard,
+                          :pm1_0_env,      :pm2_5_env,
+                          :concentration_unit,
+
+                          # These fields are "number of particles beyond N um
+                          # per 0.1L of air". These numbers are multiplied by
+                          # 10, so 03um == "number of particles beyond 0.3um
+                          # in 0.1L of air"
+                          :particle_03um,   :particle_05um,   :particle_10um,
+                          :particle_25um,   :particle_50um,   :particle_100um)
+end
+
+loop do
+  m, _ = socket.recvfrom(2000)
+  record = JSON.load(m)[1]
+
+  data = record["record"].unpack("m0").first
+  unpack = data.unpack('CCnn14')
+  crc = 0x42 + 0x4d + 28 + data.bytes.drop(4).first(26).inject(:+)
+  unless crc != unpack.last
+    p Sample.new(Time.now.utc, *unpack.drop(3).first(12))
+  end
+end
+This code just listens for incoming data and prints it out.
+
+I’ve posted the code here.
+
+Conclusion
+This is what I did over the long weekend! Since the AQ sensor only uses the RX and TX pins on the ESP8266, it means I’ve got at least two more GPIO pins left. Next I’ll add temperature and humidity sensor, then make something a bit more permanent.
+
+read more »
+Instance Variable Performance
+2019-06-26 @ 08:14
+Let’s start today’s post with a weird Ruby benchmark:
+
+require "benchmark/ips"
+
+class Foo
+  def initialize forward
+    forward ? go_forward : go_backward
+  end
+
+  ivars = ("a".."zz").map { |name| "@#{name} = 5" }
+
+  # define the go_forward method
+  eval "def go_forward; #{ivars.join("; ")} end"
+
+  # define the go_backward method
+  eval "def go_backward; #{ivars.reverse.join("; ")} end"
+end
+
+# Heat
+Foo.new true
+Foo.new false
+
+Benchmark.ips do |x|
+  x.report("backward") { 5000.times { Foo.new false } }
+  x.report("forward")  { 5000.times { Foo.new true } }
+end
+This code defines a class that sets a bunch of instance variables, but the order that the instance variables are set depends on the parameter passed in to the constructor. When we pass true, it defines instance variables “a” through “zz”, and when we pass false it defines them “zz” through “a”.
+
+Here’s the result of the benchmark on my machine:
+
+$ ruby weird_bench.rb
+Warming up --------------------------------------
+            backward     3.000  i/100ms
+             forward     2.000  i/100ms
+Calculating -------------------------------------
+            backward     38.491  (±10.4%) i/s -    192.000  in   5.042515s
+             forward     23.038  (± 8.7%) i/s -    114.000  in   5.004367s
+For some reason, defining the instance variables backwards is faster than defining the instance variables forwards. In this post we’ll discuss why. But for now, just know that if you want performant code, always define your instance variables backwards (just kidding, don’t do that).
+
+How Are Instance Variables Stored?
+In Ruby (specifically MRI), object instances point at an array, and instance variables are stored in that array. Of course, we refer to instance variables by names, not by array indexes, so Ruby keeps a map of “names to indexes” which is stored on the class of the object.
+
+Let’s say we have some code like this:
+
+class Foo
+  def initialize
+    @a = "foo"
+    @b = "bar"
+    @c = "baz"
+    @d = "hoge"
+  end
+end
+
+Foo.new
+Internally, the object relationship will look something like this:
+
+Instance Variable Relationship
+
+The class points at a map of “names to indexes” called the “IV Index Table”. The IV Index Table contains the names of the instance variables along with the index of where to find that instance variable.
+
+The instance points at the class, and also points at an array that contains the actual values of the instance variables.
+
+Why go to all this trouble to map instance variable names to array offsets? The reason is that it is much faster to access an array element than look up something from a hash. We do have to do a hash lookup to find the array element, but instance variables have their own inline cache, so the lookup doesn’t occur very often.
+
+Setting Instance Variables in Slow Motion
+I want to walk through exactly what happens when instance variables are set, but we’re going to do it twice. We’ll use the code below:
+
+class Foo
+  def initialize
+    @a = "foo"
+    @b = "bar"
+    @c = "baz"
+    @d = "hoge"
+  end
+end
+
+Foo.new
+Foo.new
+Ruby creates the instance variable index table lazily, so it doesn’t actually exist until the first time the code executes. The following GIF shows the execution flow for the first time Foo.new is called:
+
+Ivar Execution
+
+The first time initialize is executed, the Foo class doesn’t have an instance variable index table associated with it, so when the first instance variable @a is set, we create a new index table, then set @a to be index 0, then set the value “foo” in the instance variable array at index 0.
+
+When we see instance variable @b, it doesn’t have an entry in the index table, so we add a new entry that points to position 1, then set position 1 in the array to “bar”.
+
+This process repeats for each of the instance variables in the method.
+
+Now lets look at what happens the second time we call Foo.new:
+
+Ivar Execution Second Time
+
+This time, the class already has an instance variable index table associated with it. When the instance variable @a is set, it exists in the index table with position 0, so we set “foo” to position 0 in the instance variable list.
+
+When we see instance variable @b, it already has an entry in the index table with position 1, so we set “bar” to position 1 in the instance variable list.
+
+This process repeats for each of the variables in the method.
+
+We can actually observe the lazy creation of the index table by using ObjectSpace.memsize_of:
+
+require "objspace"
+
+class Foo
+  def initialize
+    @a = "foo"
+    @b = "bar"
+    @c = "baz"
+    @d = "hoge"
+  end
+end
+
+p ObjectSpace.memsize_of(Foo) # => 520
+Foo.new
+p ObjectSpace.memsize_of(Foo) # => 672
+Foo.new
+p ObjectSpace.memsize_of(Foo) # => 672
+The size of Foo is smaller before we instantiate our first instance, but remains the same size after subsequent allocations. Neat!
+
+Lets do one more example, but with the following code:
+
+class Foo
+  def initialize init_all
+    if init_all
+      @a = "foo"
+      @b = "bar"
+      @c = "baz"
+      @d = "hoge"
+    else
+      @c = "baz"
+      @d = "hoge"
+    end
+  end
+end
+
+Foo.new true
+Foo.new false
+After the first call of Foo.new true, the Foo class will have an instance variable index table just like the previous examples. @a will be associated with position 0, @b with position 1, and so on. But what happens on the second allocation at Foo.new false?
+
+Ivar Execution Third Time
+
+In this case, we already have an index table associated with the class, but @c is associated with position 2 in the instance variable array, so we have to expand the array leaving position 0 and 1 unset (internally Ruby sets them to Qundef). Then @d is associated with position 3, and it is set as usual.
+
+The important part about this is that instance variable lists must expand to the width required for the index offset. Now lets talk about how the list expands.
+
+Instance Variable List Allocation and Expansion
+We saw how the instance variable index table is created. Now I want to spend some time focusing on the instance variable list. This list is associated with the instance and stores references to our actual instance variable values.
+
+This list is lazily allocated and expands as it needs to accommodate more values. Here is the code that figures out by how much the array should grow.
+
+I’ve translated that function to Ruby code and added a few more comments:
+
+def iv_index_tbl_newsize(ivup)
+  index = ivup.index
+  newsize = (index + 1) + (index + 1)/4 # (index + 1) * 1.25
+
+
+  # if the index table *wasn't* extended, then clamp the newsize down to
+  # the size of the index table.  Otherwise, use a size 25% larger than
+  # the requested index
+  if !ivup.iv_extended && ivup.index_table.size < newsize
+    ivup.index_table.size
+  else
+    newsize
+  end
+end
+
+IVarUpdate = Struct.new(:index, :iv_extended, :index_table)
+index_table = { a: 0, b: 1, c: 2, d: 3 } # table from our examples
+
+# We're setting `@c`, which has an index of 2. `false` means we didn't mutate
+# the index table.
+p iv_index_tbl_newsize(IVarUpdate.new(index_table[:c], false, index_table))
+The return value of iv_index_tbl_newsize is used to determine how much memory we need for the instance variable array. As you can see, its return value is based on the index of the instance variable, and we got that index from the index table.
+
+If the index table was mutated, then we’ll allow the instance variable list to grow without bounds. But if the index table was not mutated, then we clamp the array size to the size of the index table.
+
+This means that the first time we allocate a particular Ruby object, it can be larger than subsequent allocations. Again, we can use ObjectSpace.memsize_of to observe this behavior:
+
+require "objspace"
+
+class Foo
+  def initialize
+    @a = "foo"
+    @b = "bar"
+    @c = "baz"
+    @d = "hoge"
+  end
+end
+
+p ObjectSpace.memsize_of(Foo.new) # => 80
+p ObjectSpace.memsize_of(Foo.new) # => 72
+p ObjectSpace.memsize_of(Foo.new) # => 72
+The first allocation is larger because it’s the first time we’ve “seen” these instance variables. The subsequent allocations are smaller because Ruby clamps the instance variable array size.
+
+Watching the Instance Variable Array Grow
+Let’s do one more experiment before we get on to why the initial benchmark behaves the way it does. Here we’re going to watch the size of the object grow as we add instance variables (again, using ObjectSpace.memsize_of):
+
+require "objspace"
+
+class Foo
+  def initialize
+    @a = 1
+    p ObjectSpace.memsize_of(self)
+    @b = 1
+    p ObjectSpace.memsize_of(self)
+    @c = 1
+    p ObjectSpace.memsize_of(self)
+    @d = 1
+    p ObjectSpace.memsize_of(self)
+    @e = 1
+    p ObjectSpace.memsize_of(self)
+    @f = 1
+    p ObjectSpace.memsize_of(self)
+    @g = 1
+    p ObjectSpace.memsize_of(self)
+    @h = 1
+    p ObjectSpace.memsize_of(self)
+  end
+end
+
+puts "First"
+Foo.new
+puts "Second"
+Foo.new
+Here’s the output from the program:
+
+$ ruby ~/thing.rb 
+First
+40
+40
+40
+80
+80
+96
+96
+120
+Second
+40
+40
+40
+80
+80
+96
+96
+104
+You can see that as we add instance variables to the object, the object gets bigger! Let’s make one change to the benchmark and run it again. This time we’ll add an option that lets us define the “last” instance variable first:
+
+require "objspace"
+
+class Foo
+  def initialize eager_h
+    if eager_h
+      @h = 1
+    end
+    @a = 1
+    p ObjectSpace.memsize_of(self)
+    @b = 1
+    p ObjectSpace.memsize_of(self)
+    @c = 1
+    p ObjectSpace.memsize_of(self)
+    @d = 1
+    p ObjectSpace.memsize_of(self)
+    @e = 1
+    p ObjectSpace.memsize_of(self)
+    @f = 1
+    p ObjectSpace.memsize_of(self)
+    @g = 1
+    p ObjectSpace.memsize_of(self)
+    @h = 1
+    p ObjectSpace.memsize_of(self)
+  end
+end
+
+puts "First"
+Foo.new false
+puts "Second"
+Foo.new true
+Here’s the output:
+
+$ ruby ~/thing.rb
+First
+40
+40
+40
+80
+80
+96
+96
+120
+Second
+104
+104
+104
+104
+104
+104
+104
+104
+On the first allocation, we can observe the size of the object gradually expand as usual. However, on the second allocation, we ask it to eagerly set @h and the growth pattern is totally different. In fact, it doesn’t grow at all!
+
+Since @h is last in our index table, Ruby immediately expands the array list in order to set the value for the @h slot. Since the instance variable array is now at maximum capacity, none of the subsequent instance variable sets need the array to expand.
+
+Back To Our Initial Benchmark
+Every time Ruby needs to expand the instance variable array, it requires calling realloc in order to expand that chunk of memory. We can observe calls to realloc using dtrace.
+
+class Foo
+  def initialize forward
+    forward ? go_forward : go_backward
+  end
+
+  ivars = ("a".."zz").map { |name| "@#{name} = 5" }
+
+  # define the go_forward method
+  eval "def go_forward; #{ivars.join("; ")} end"
+
+  # define the go_backward method
+  eval "def go_backward; #{ivars.reverse.join("; ")} end"
+end
+
+# Heat
+Foo.new true
+
+if ARGV[0]
+  1000.times { Foo.new false }
+else
+  1000.times { Foo.new true }
+end
+Here I’ve rewritten the benchmark so that we can control the direction via an environment variable. Let’s use dtrace to measure the number of calls to realloc in both situations.
+
+This case is always going forward:
+
+$ sudo dtrace -q -n 'pid$target::realloc:entry { @ = count(); }' -c "/Users/aaron/.rbenv/versions/ruby-trunk/bin/ruby thing.rb"
+dtrace: system integrity protection is on, some features will not be available
+
+
+             8369
+This case is forward once, then reverse the rest of the time:
+
+$ sudo dtrace -q -n 'pid$target::realloc:entry { @ = count(); }' -c "/Users/aaron/.rbenv/versions/ruby-trunk/bin/ruby thing.rb reverse"
+dtrace: system integrity protection is on, some features will not be available
+
+
+             4369
+We can see that “starting from the end” decreases the number of calls to realloc significantly. These increased calls to realloc are why it’s faster to define our instance variables forward once, then backward the rest of the time!
+
+I hope this was an interesting article. Please have a good day!
+
+read more »
+Speeding up Ruby with Shared Strings
+2018-02-12 @ 10:00
+It’s not often I am able to write a patch that not only reduces memory usage, but increases speed as well. Usually I find myself trading memory for speed, so it’s a real treat when I can improve both in one patch. Today I want to talk about the patch I submitted to Ruby in this ticket. It decreases “after boot” memory usage of a Rails application by 4% and speeds up require by about 35%.
+
+When I was writing this patch, I was actually focusing on trying to reduce memory usage. It just happens that reducing memory usage also resulted in faster runtime. So really I wanted to title this post “Reducing Memory Usage in Ruby”, but I already made a post with that title.
+
+Shared String Optimization
+As I mentioned in previous posts, Ruby objects are limited to 40 bytes. But a string can be much longer than 40 bytes, so how are they stored? If we look at the struct that represents strings, we’ll find there is a char * pointer:
+
+struct RString {
+    struct RBasic basic;
+    union {
+        struct {
+            long len;
+            char *ptr;
+            union {
+                long capa;
+                VALUE shared;
+            } aux;
+        } heap;
+        char ary[RSTRING_EMBED_LEN_MAX + 1];
+    } as;
+};
+The ptr field in the string struct points to a byte array which is our string. So the actual memory usage of a string is approximately 40 bytes for the object, plus however long the string is. If we were to visualize the layout, it would look something like this:
+
+RString pointing to char array
+
+In this case, there are really two allocations: the RString object and the “hello world” character array. The RString object is the 40 byte Ruby object allocated using the GC, and the character array was allocated using the system’s malloc implementation.
+
+Side note: There is another optimization called “embedding”. Without getting too far off track, “embedding” is just keeping strings that are “small enough” stored directly inside the RString structure. We can talk about that in a different post, but today pretend there are always two distinct allocations.
+
+We can take advantage of this character array and represent substrings by just pointing at a different location. For example, we can have two Ruby objects, one representing the string “hello world” and the other representing the string “world” and only allocate one character array buffer:
+
+RStrings sharing a char array
+
+This example only has 3 allocations: 2 from the GC for the Ruby string objects, and one malloc for the character array. Using ObjectSpace, we can actually observe this optimization by measuring memory size of the objects after slicing them:
+
+>> require 'objspace'
+=> true
+>> str = "x" * 9000; nil
+=> nil
+>> ObjectSpace.memsize_of str
+=> 9041
+>> substr = str[30, str.length - 30]; nil
+=> nil
+>> str.length
+=> 9000
+>> substr.length
+=> 8970
+>> ObjectSpace.memsize_of substr
+=> 40
+The example above first allocates a string that is 9000 characters. Next we measure the memory size of the string. The total size is 9000 for the characters, plus some overhead for the Ruby object for a total of 9041. Next we take a substring, slicing off the first 30 characters of the original. As expected, the original string is 9000 characters, and the substring is 8970. However, if we measure the size of the substring it is only 40 bytes! This is because the new string only requires a new Ruby object to be allocated, and the new object just points at a different location in the original string’s character buffer, just like the graph above showed.
+
+This optimization isn’t limited to just strings, we can use it with arrays too:
+
+>> list = ["x"] * 9000; nil
+=> nil
+>> ObjectSpace.memsize_of(list)
+=> 72040
+>> list2 = list[30, list.length - 30]; nil
+=> nil
+>> ObjectSpace.memsize_of(list2)
+=> 40
+In fact, functional languages where data structures are immutable can take great advantage of this optimization. In languages that allow mutations, we have to deal with the case that the original string might be mutated, where languages with immutable data structures can be even more aggressive about optimization.
+
+Limits of the Shared String Optimization
+This shared string optimization isn’t without limits though. To take advantage of this optimization, we have to always go to the end of the string. In other words, we can’t take a slice from the middle of the string and get the optimization. Lets take our sample string and slice 15 characters off each side and see what the memsize is:
+
+>> str = "x" * 9000; nil
+=> nil
+>> str.length
+=> 9000
+>> substr = str[15, str.length - 30]; nil
+=> nil
+>> substr.length
+=> 8970
+>> ObjectSpace.memsize_of(substr)
+=> 9011
+We can see in the above example that the memsize of the substring is much larger than in the first example. That is because Ruby had to create a new buffer to store the substring. So our lesson here is: if you have to slice strings, start from the left and go all the way to the end.
+
+Here is an interesting thing to think about. At the end of the following program, what is the memsize of substr? How much memory is this program actually consuming? Is the str object still alive, and how can we find out?
+
+require 'objspace'
+
+str = "x" * 9000
+substr = str[30, str.length - 30]
+str = nil
+GC.start
+
+# What is the memsize of substr?
+# How much memory is this program actually consuming?
+# Is `str` still alive even though we did a GC?
+# Hint: use `ObjectSpace.dump_all`
+# (if you try this out, I recommend running the program with `--disable-gems`)
+The optimization I explained above works exactly the same way for strings in C as it does in Ruby. We will use this optimization to reduce memory usage and speed up require in Ruby.
+
+Reducing Memory Usage and Speeding Up require
+I’ve already described the technique we’re going to use to speed up require, so lets take a look at the problem. After that, we’ll apply the shared string optimization to improve performance of require.
+
+Every time a program requires a file, Ruby has to check to see if that file has already been required. The global variable $LOADED_FEATURES is a list of all the files that have been required so far. Of course, searching through a list for a file would be quite slow and get slower as the list grows, so Ruby keeps a hash to look up entries in the $LOADED_FEATURES list. This hash is called the loaded_features_index, and it’s stored on the virtual machine structure here.
+
+The keys of this hash are strings that could be passed to require to require a particular file, and the value is the index in the $LOADED_FEATURES array of the file that actually got required. So, for example if you have a file on your system: /a/b/c.rb, the keys to the hash will be:
+
+“/a/b/c.rb”
+“a/b/c.rb”
+“b/c.rb”
+“c.rb”
+“/a/b/c”
+“a/b/c”
+“b/c”
+“c”
+Given a well crafted load path, any of the strings above could be used to load the /a/b/c.rb file, so the index needs to keep all of them. For example, you could do ruby -I / -e"require 'a/b/c'", or ruby -I /a -e"require 'b/c'"', etc, and they all point to the same file.
+
+The loaded_features_index hash is built in the features_index_add function. Lets pick apart this function a little.
+
+static void
+features_index_add(VALUE feature, VALUE offset)
+{
+    VALUE short_feature;
+    const char *feature_str, *feature_end, *ext, *p;
+
+    feature_str = StringValuePtr(feature);
+    feature_end = feature_str + RSTRING_LEN(feature);
+
+    for (ext = feature_end; ext > feature_str; ext--)
+        if (*ext == '.' || *ext == '/')
+            break;
+    if (*ext != '.')
+        ext = NULL;
+    /* Now `ext` points to the only string matching %r{^\.[^./]*$} that is
+       at the end of `feature`, or is NULL if there is no such string. */
+This function takes a feature and an offset as parameters. The feature is the full name of the file that was required, extension and everything. offset is the index in the loaded features list where this string is. The first part of this function starts at the end of the string and scans backwards looking for a period or a forward slash. If it finds a period, we know the file has an extension (it is possible to require a Ruby file without an extension!), if it finds a forward slash, it gives up and assumes there is no extension.
+
+    while (1) {
+        long beg;
+
+        p--;
+        while (p >= feature_str && *p != '/')
+            p--;
+        if (p < feature_str)
+            break;
+        /* Now *p == '/'.  We reach this point for every '/' in `feature`. */
+        beg = p + 1 - feature_str;
+        short_feature = rb_str_subseq(feature, beg, feature_end - p - 1);
+        features_index_add_single(short_feature, offset);
+        if (ext) {
+            short_feature = rb_str_subseq(feature, beg, ext - p - 1);
+            features_index_add_single(short_feature, offset);
+        }
+    }
+Next we scan backwards in the string looking for forward slashes. Every time it finds a forward slash, it uses rb_str_subseq to get a substring and then calls features_index_add_single to register that substring. rb_str_subseq gets substrings in the same way we were doing above in Ruby, and applies the same optimizations.
+
+The if (ext) conditional deals with files that have an extension, and this is really where our problems begin. This conditional gets a substring of feature, but it doesn’t go all the way to the end of the string. It must exclude the file extension. This means it will copy the underlying string. So these two calls to rb_str_subseq do 3 allocations total: 2 Ruby objects (the function returns a Ruby object) and one malloc to copy the string for the “no extension substring” case.
+
+This function calls features_index_add_single to add the substring to the index. I want to call out one excerpt from the features_index_add_single function:
+
+    features_index = get_loaded_features_index_raw();
+    st_lookup(features_index, (st_data_t)short_feature_cstr, (st_data_t *)&this_feature_index);
+
+    if (NIL_P(this_feature_index)) {
+        st_insert(features_index, (st_data_t)ruby_strdup(short_feature_cstr), (st_data_t)offset);
+    }
+This code looks up the string in the index, and if the string isn’t in the index, it adds it to the index. The caller allocated a new Ruby string, and that string could get garbage collected, so this function calls ruby_strdup to copy the string for the hash key. It’s important to note that the keys to this hash aren’t Ruby objects, but char * pointers that came from Ruby objects (the char *ptr field that we were looking at earlier).
+
+Lets count the allocations. So far, we have 2 Ruby objects: one with a file extension and one without, 1 malloc for the non-sharable substring, then 2 more mallocs to copy the string in to the hash. So each iteration of the while loop in features_index_add will do 5 allocations: 2 Ruby objects, and 3 mallocs.
+
+In cases like this, a picture might help explain better. Below is a diagram of the allocated memory and how they relate to each other.
+
+Allocations on Trunk
+
+This diagram shows what the memory layout looks like when adding the path /a/b/c.rb to the index, resulting in 8 hash entries.
+
+Blue nodes are allocations that were alive before the call to add the path to the index. Red nodes are intermediate allocations done while populating the index, and will be freed at some point. Black nodes are allocations made while adding the path to the index but live after we’ve finished adding the path to the index. Solid arrows represent actual references, where dotted lines indicate a relationship but not actually a reference (like one string was ruby_strdup‘d from another).
+
+The graph has lots of nodes and is very complicated, but we will clean it up!
+
+Applying the Shared String Optimization
+I’ve translated the C code to Ruby code so that we can more easily see the optimization at work:
+
+$features_index = {}
+
+def features_index_add(feature, index)
+  ext = feature.index('.')
+  p = ext ? ext : feature.length
+
+  loop do
+    p -= 1
+    while p > 0 && feature[p] != '/'
+      p -= 1
+    end
+    break if p == 0
+
+    short_feature = feature[p + 1, feature.length - p - 1] # New Ruby Object
+    features_index_add_single(short_feature, index)
+
+    if ext # slice out the file extension if there is one
+      short_feature = feature[p + 1, ext - p - 1] # New Ruby Object + malloc
+      features_index_add_single(short_feature, index)
+    end
+  end
+end
+
+def features_index_add_single(str, index)
+  return if $features_index.key?(str)
+
+  $features_index[str.dup] = index # malloc
+end
+
+features_index_add "/a/b/c.rb", 1
+As we already learned, the shared string optimization only works when the substrings include the end of the shared string. That is, we can only take substrings from the left side of the string.
+
+The first change we can make is to split the strings in to two cases: one with an extension, and one without. Since the “no extension” if statement does not scan to the end of the string, it always allocates a new string. If we make a new string that doesn’t contain the extension, then we can eliminate one of the malloc cases:
+
+$features_index = {}
+
+def features_index_add(feature, index)
+  no_ext_feature = nil
+  p              = feature.length
+  ext            = feature.index('.')
+
+  if ext
+    p = ext
+    no_ext_feature = feature[0, ext] # New Ruby Object + malloc
+  end
+
+  loop do
+    p -= 1
+    while p > 0 && feature[p] != '/'
+      p -= 1
+    end
+    break if p == 0
+
+    short_feature = feature[p + 1, feature.length - p - 1] # New Ruby Object
+    features_index_add_single(short_feature, index)
+
+    if ext
+      len = no_ext_feature.length
+      short_feature = no_ext_feature[p + 1, len - p - 1] # New Ruby Object
+      features_index_add_single(short_feature, index)
+    end
+  end
+end
+
+def features_index_add_single(str, index)
+  return if $features_index.key?(str)
+
+  $features_index[str.dup] = index # malloc
+end
+
+features_index_add "/a/b/c.rb", 1
+This changes the function to allocate one new string, but always scan to the end of both strings. Now we have two strings that we can use to “scan from the left”, we’re able to avoid new substring mallocs in the loop. You can see this change, where I allocate a new string without an extension here.
+
+Below is a graph of what the memory layout and relationships look like after pulling up one slice, then sharing the string:
+
+Allocations after shared slice
+
+You can see from this graph that we were able to eliminate string buffers by allocating the “extensionless” substring first, then taking slices from it.
+
+There are two more optimizations I applied in this patch. Unfortunately they are specific to the C language and not easy to explain using Ruby.
+
+Eliminating Ruby Object Allocations
+The existing code uses Ruby to slice strings. This allocates a new Ruby object. Now that we have two strings, we can always take substrings from the left, and that means we can use pointers in C to “create” substrings. Rather than asking Ruby APIs to slice the string for us, we simply use a pointer in C to point at where we want the substring to start. The hash table that maintains the index uses C strings as keys, so instead of passing Ruby objects around, we’ll just pass a pointer in to the string:
+
+-       short_feature = rb_str_subseq(feature, beg, feature_end - p - 1);
+-       features_index_add_single(short_feature, offset);
++       features_index_add_single(feature_str + beg, offset);
+        if (ext) {
+-           short_feature = rb_str_subseq(feature, beg, ext - p - 1);
+-           features_index_add_single(short_feature, offset);
++           features_index_add_single(feature_no_ext_str + beg, offset);
+        }
+     }
+-    features_index_add_single(feature, offset);
++    features_index_add_single(feature_str, offset);
+     if (ext) {
+-       short_feature = rb_str_subseq(feature, 0, ext - feature_str);
+-       features_index_add_single(short_feature, offset);
++       features_index_add_single(feature_no_ext_str, offset);
+In this case, using a pointer in to the string simplifies our code. feature_str is a pointer to the head of the string that has a file extension, and feature_no_ext_str is a pointer to the head of the string that doesn’t have a file extension. beg is the number of characters from the head of the string where we want to slice. All we have to do now is just add beg to the head of each pointer and pass that to features_index_add_single.
+
+In this graph you can see we no longer need the intermediate Ruby objects because the “add single” function directly accesses the underlying char * pointer:
+
+Allocations after pointer substrings
+
+Eliminating malloc Calls
+Finally, lets eliminate the ruby_strdup calls. As we covered earlier, new Ruby strings could get allocated. These Ruby strings would get free’d by the garbage collector, so we had to call ruby_strdup to keep a copy around inside the index hash. The feature string passed in is also stored in the $LOADED_FEATURES global array, so there is no need to copy that string as the array will prevent the GC from collecting it. However, we created a new string that does not have an extension, and that object could get collected. If we can prevent the GC from collecting those strings, then we don’t need to copy anything.
+
+To keep these new strings alive, I added an array to the virtual machine (the virtual machine lives for the life of the process):
+
+     vm->loaded_features = rb_ary_new();
+     vm->loaded_features_snapshot = rb_ary_tmp_new(0);
+     vm->loaded_features_index = st_init_strtable();
++    vm->loaded_features_index_pool = rb_ary_new();
+Then I add the new string to the array via rb_ary_push right after allocation:
+
++       short_feature_no_ext = rb_fstring(rb_str_freeze(rb_str_subseq(feature, 0, ext - feature_str)));
++       feature_no_ext_str = StringValuePtr(short_feature_no_ext);
++       rb_ary_push(get_loaded_features_index_pool_raw(), short_feature_no_ext);
+Now all strings in the index hash are shared and kept alive. This means we can safely remove the ruby_strdup without any strings getting free’d by the GC:
+
+     if (NIL_P(this_feature_index)) {
+-       st_insert(features_index, (st_data_t)ruby_strdup(short_feature_cstr), (st_data_t)offset);
++       st_insert(features_index, (st_data_t)short_feature_cstr, (st_data_t)offset);
+     }
+After this change, we don’t need to copy any memory because the hash keys can point directly in to the underlying character array inside the Ruby string object:
+
+Use string indexes for keys
+
+This new algorithm does 2 allocations: one to create a “no extension” copy of the original string, and one RString object to wrap it. The “loaded features index pool” array keeps the newly created string from being garbage collected, and now we can point directly in to the string arrays without needing to copy the strings.
+
+For any file added to the “loaded features” array, we changed it from requiring O(N) allocations (where N is the number of slashes in a string) to always requiring only two allocations regardless of the number of slashes in the string.
+
+END
+By using shared strings I was able to eliminate over 76000 system calls during the Rails boot process on a basic app, reduce the memory footprint by 4%, and speed up require by 35%. Next week I will try to get some statistics from a large application and see how well it performs there!
+
+Thanks for reading!
+
+read more »
+Reducing Memory Usage in Ruby
+2018-01-23 @ 13:36
+I’ve been working on building a compacting garbage collector in Ruby for a while now, and one of the biggest hurdles for implementing a compacting GC is updating references. For example, if Object A points to Object B, but the compacting GC moves Object B, how do we make sure that Object A points to the new location?
+
+Solving this problem has been fairly straight forward for most objects. Ruby’s garbage collector knows about the internals of most Ruby Objects, so after the compactor runs, it just walks through all objects and updates their internals to point at new locations for any moved objects. If the GC doesn’t know about the internals of some object (for example an Object implemented in a C extension), it doesn’t allow things referred to by that object to move. For example, Object A points to Object B. If the GC doesn’t know how to update the internals of Object A, it won’t allow Object B to move (I call this “pinning” an object).
+
+Of course, the more objects we allow to move, the better.
+
+Earlier I wrote that updating references for most objects is fairly straight forward. Unfortunately there has been one thorn in my side for a while, and that has been Instruction Sequences.
+
+Instruction Sequences
+When your Ruby code is compiled, it is turned in to instruction sequence objects, and those objects are Ruby objects. Typically you don’t interact with these Ruby objects, but they are there. These objects store byte code for your Ruby program, any literals in your code, and some other miscellaneous information about the code that was compiled (source location, coverage info, etc).
+
+Internally, these instruction sequence objects are referred to as “IMEMO” objects. There are multiple sub-types of IMEMO objects, and the instruction sequence sub-type is “iseq”. If you are using Ruby 2.5, and you dump the heap using ObjectSpace, you’ll see the dump now contains these IMEMO subtypes. Lets look at an example.
+
+I’ve been using the following code to dump the heap in a Rails application:
+
+require 'objspace'
+require 'config/environment'
+
+File.open('output.txt', 'w') do |f|
+  ObjectSpace.dump_all(output: f)
+end
+The above code outputs all objects in memory to a file called “output.txt” in JSON lines format. Here are a couple IMEMO records from a Rails heap dump:
+
+{
+  "address": "0x7fc89d00c400",
+  "type": "IMEMO",
+  "class": "0x7fc89e95c130",
+  "imemo_type": "ment",
+  "memsize": 40,
+  "flags": {
+    "wb_protected": true,
+    "old": true,
+    "uncollectible": true,
+    "marked": true
+  }
+}
+{
+  "address": "0x7fc89d00c2e8",
+  "type": "IMEMO",
+  "imemo_type": "iseq",
+  "references": [
+    "0x7fc89d00c270",
+    "0x7fc89e989a68",
+    "0x7fc89e989a68",
+    "0x7fc89d00ef48"
+  ],
+  "memsize": 40,
+  "flags": {
+    "wb_protected": true,
+    "old": true,
+    "uncollectible": true,
+    "marked": true
+  }
+}
+This example came from Ruby 2.5, so both records contain an imemo_type field. The first example is a “ment” or “method entry”, and the second example is an “iseq” or an “instruction sequence”. Today we’ll look at instruction sequences.
+
+Format of Instruction Sequence
+The instruction sequences are the result of compiling our Ruby code. The instruction sequences are a binary representation of our Ruby code. These instructions are stored on the instruction sequence object, specifically this iseq_encoded field (iseq_size is the length of the iseq_encoded field).
+
+If you were to examine iseq_encoded, you’ll find it’s just a list of numbers. The list of numbers is virtual machine instructions as well as parameters (operands) for the instructions.
+
+If we examine the iseq_encoded list, it might look something like this:
+
+ 	Address	Description
+0	0x00000001001cddad	Instruction (0 operands)
+1	0x00000001001cdeee	Instruction (2 operands)
+2	0x00000001001cdf1e	Operand
+3	0x000000010184c400	Operand
+4	0x00000001001cdeee	Instruction (2 operands)
+5	0x00000001001c8040	Operand
+6	0x0000000100609e40	Operand
+7	0x0000000100743d10	Instruction (1 operand)
+8	0x00000001001c8040	Operand
+9	0x0000000100609e50	Instruction (1 operand)
+10	0x0000000100743d38	Operand
+Each element of the list corresponds to either an instruction, or the operands for an instruction. All of the operands for an instruction follow that instruction in the list. The operands are anything required for executing the corresponding instruction, including Ruby objects. In other words, some of these addresses could be addresses for Ruby objects.
+
+Since some of these addresses could be Ruby objects, it means that instruction sequences reference Ruby objects. But, if instruction sequences reference Ruby objects, how do the instruction sequences prevent those Ruby objects from getting garbage collected?
+
+Liveness and Code Compilation
+As I said, instruction sequences are the result of compiling your Ruby code. During compilation, some parts of your code are converted to Ruby objects and then the addresses for those objects are embedded in the byte code. Lets take a look at an example of when a Ruby object will be embedded in instruction sequences, then look at how those objects are kept alive.
+
+Our sample code is just going to be puts "hello world". We can use RubyVM::InstructionSequence to compile the code, then disassemble it. Disassembly decodes iseq_encoded and prints out something more readable.
+
+>> insns = RubyVM::InstructionSequence.compile 'puts "hello world"'
+=> <RubyVM::InstructionSequence:<compiled>@<compiled>>
+>> puts insns.disasm
+== disasm: #<ISeq:<compiled>@<compiled>>================================
+0000 trace            1                                               (   1)
+0002 putself          
+0003 putstring        "hello world"
+0005 opt_send_without_block <callinfo!mid:puts, argc:1, FCALL|ARGS_SIMPLE>, <callcache>
+0008 leave            
+=> nil
+>>
+Instruction 003 is the putstring instruction. Lets look at the definition of the putstring instruction which can be found in insns.def:
+
+/* put string val. string will be copied. */
+DEFINE_INSN
+putstring
+(VALUE str)
+()
+(VALUE val)
+{
+    val = rb_str_resurrect(str);
+}
+When the virtual machine executes, it will jump to the location of the putstring instruction, decode operands, and provide those operands to the instruction. In this case, the putstring instruction has one operand called str which is of type VALUE, and one return value called val which is also of type VALUE. The instruction body itself simply calls rb_str_resurrect, passing in str, and assigning the return value to val. rb_str_resurrect just duplicates a Ruby string. So this instruction takes a Ruby object (a string which has been stored in the instruction sequences), duplicates that string, then the virtual machines pushes that duplicated string on to the stack. For a fun exercise, try going through this process with puts "hello world".freeze and take a look at the difference.
+
+Now, how does the string “hello world” stay alive until this instruction is executed? Something must mark the string object so the garbage collector knows that a reference is being held.
+
+The way the instruction sequences keep these objects alive is through the use of what it calls a “mark array”. As the compiler converts your code in to instruction sequences, it will allocate a string for “hello world”, then push that string on to an array. Here is an excerpt from compile.c that does this:
+
+case TS_VALUE:    /* VALUE */
+{
+    VALUE v = operands[j];
+    generated_iseq[code_index + 1 + j] = v;
+    /* to mark ruby object */
+    iseq_add_mark_object(iseq, v);
+    break;
+}
+All iseq_add_mark_object does is push the VALUE on to an array which is stored on the instruction sequence object. iseq is the instruction sequence object, and v is the VALUE we want to keep alive (in this case the string “hello world”). If you look in vm_core.h, you can find the location of that mark array with a comment that says:
+
+VALUE mark_ary;     /* Array: includes operands which should be GC marked */
+Instruction Sequence References and Compaction
+So, instruction sequences contain two references to a string literal: one in the instructions in iseq_encoded, and one via the mark array. If the string literal moves, then both locations will need to be updated. Updating array internals is fairly trivial: it’s just a list. Updating instruction sequences on the other hand is not so easy.
+
+To update references in the instruction sequences, we have to disassemble the instructions, locate any VALUE operands, and update those locations. There wasn’t any code to walk these instructions, so I introduced a function that would disassemble instructions and call a function pointer with those objects. This allows us to find new locations of Ruby objects and update the instructions. But what if we could use this function for something more?
+
+Reducing Memory
+Now we’re finally on to the part about saving memory. The point of the mark arrays stored on the instruction sequence objects is to keep any objects referred to by instruction sequences alive:
+
+ISeq and Array marking paths
+
+We can reuse the “update reference” function to mark references contained directly in instruction sequences. This means we can reduce the size of the mark array:
+
+Mark Literals via disasm
+
+Completely eliminating the mark array is a different story as there are things stored in the mark array that aren’t just literals. However, if we directly mark objects from the instruction sequences, then we rarely have to grow the array. The amount of memory we save is the size of the array plus any unused extra capacity in the array.
+
+I’ve made a patch that implements this strategy, and you can find it on the GitHub fork of Ruby.
+
+I found that this saves approximately 3% memory on a basic Rails application set to production mode. Of course, the more code you load, the more memory you save. I expected the patch to impact GC performance because disassembling instructions and iterating through them should be harder than just iterating an array. However, since instruction sequences get old, and we have a generational garbage collector, the impact to real apps is very small.
+
+I’m working to upstream this patch to Ruby, and you can follow along and read more information about the analysis here.
+
+Anyway, I hope you found this blurgh post informative, and please have a good day!
+
+<3 <3 <3
+
+I want to give a huge thanks to Allison McMillan. Every week she’s been helping me figure out what is going on with this complex code. I definitely recommend that you follow her on Twitter.
+
+read more »
+Visualizing Your Ruby Heap
+2017-09-27 @ 11:50
+In a previous post, I wrote a bit about how Ruby objects are laid out in memory. Today we’ll use that information to write a program that will allow us to take a Ruby heap dump and visualize the layout and fragmentation of that heap.
+
+Ruby Object Layout Recap
+Just as a recap, Ruby objects are fixed width. That is, every Ruby object is the same size: 40 bytes. Objects are not really allocated with malloc, but instead they are placed inside of pages.
+
+A Ruby process has many pages. Pages have many objects.
+
+Which Page Does This Object Belong To?
+Objects are allocated in to a page. Each page is 2 ^ 14th bytes. In other words, Ruby objects aren’t allocated one at a time, but the GC allocates one page (also known as an “arena”), and when a new Ruby object is requested, it is placed inside that page.
+
+Pages aren’t exactly 2 ^ 14 bytes. When we allocate a page, we want that page to be aligned with Operating System memory pages, so the total malloc’d size needs to be some number less than a multiple of 4kb (which is the OS page size). Since the malloc system call has some overhead, we have to subtract some some amount from the actual malloc’d size so that the Ruby page aligns and fits on contiguous OS pages. The padding size we use is sizeof(size_t) * 5. So the size of a page is actually (2 ^ 14) - (sizeof(size_t) * 5).
+
+Each page has a header that contains some information about the page. The size of that header is sizeof(void *).
+
+This means the maximum number of Ruby objects that can be stored on a Ruby page is ((2 ^ 14) - (sizeof(size_t) * 5) - sizeof(void *)) / 40.
+
+Since the number of objects per page is bounded, we can apply a bitmask to the bottom 14 bits (remember page sizes are 2 ^ 14, IOW 1 left shifted 14) of a Ruby object address and calculate the page that object lives on. That bitmask is ~0 << 14.
+
+In ASCII art, say we have a Ruby object address 0x7fcc6c845108. In binary:
+
+11111111100110001101100100001000101000100001000
+^---------- page address --------^- object id ^
+“object id” in the above chart isn’t the traditional Ruby object id, it’s just the part of the bits that represent that individual object on the page. The entire address is considered the traditional “object id”.
+
+Lets extract these numbers to some Ruby code:
+
+require 'fiddle'
+
+SIZEOF_HEAP_PAGE_HEADER_STRUCT = Fiddle::SIZEOF_VOIDP
+
+SIZEOF_RVALUE           = 40
+HEAP_PAGE_ALIGN_LOG     = 14
+HEAP_PAGE_ALIGN         = 1 << HEAP_PAGE_ALIGN_LOG      # 2 ^ 14
+HEAP_PAGE_ALIGN_MASK    = ~(~0 << HEAP_PAGE_ALIGN_LOG)  # Mask for getting page address
+REQUIRED_SIZE_BY_MALLOC = Fiddle::SIZEOF_SIZE_T * 5     # padding needed by malloc
+HEAP_PAGE_SIZE          = HEAP_PAGE_ALIGN - REQUIRED_SIZE_BY_MALLOC # Actual page size
+HEAP_PAGE_OBJ_LIMIT     = (HEAP_PAGE_SIZE - SIZEOF_HEAP_PAGE_HEADER_STRUCT) / SIZEOF_RVALUE
+I mentioned this a little earlier, but I will be explicit here: Ruby pages are allocated with aligned mallocs. In other words, when a Ruby page is allocated it’s allocated on an address that is divisible by 2 ^ 14, and the size of the page is slightly smaller than 2 ^ 14.
+
+Lets write a function that, given an object address, returns the address of the page where that object was placed:
+
+def page_address_from_object_address object_address
+  object_address & ~HEAP_PAGE_ALIGN_MASK
+end
+Now lets print the page addresses for 3 object addresses:
+
+p page_address_from_object_address(0x7fcc6c8367e8) # => 140515970596864
+p page_address_from_object_address(0x7fcc6c836838) # => 140515970596864
+p page_address_from_object_address(0x7fcc6c847b88) # => 140515970662400
+We can see from the output that the first two objects live on the same page, but the third object lives on a different page.
+
+How many objects are on this page?
+Ruby objects are also aligned, but they are aligned inside the existing page. They are aligned at 40 bytes (which is also the size of the object). That means that every Ruby object address is guaranteed to be divisible by 40 (this statement isn’t true for non heap allocated objects like numbers).
+
+Ruby objects are never allocated, but they are placed inside a page that has been allocated. The pages are aligned on 2 ^ 14, but not every number divisible by 2 ^ 14 is also evenly divisible by 40. That means some pages store more objects than others. Pages that are evenly divisible by 40 will store one more object than objects that aren’t.
+
+Lets write a function that, given a page address, calculates the number of objects it can store as well as where those object are placed, and returns an object that represents the page information.
+
+Page = Struct.new :address, :obj_start_address, :obj_count
+
+def page_info page_address
+  limit = HEAP_PAGE_OBJ_LIMIT # Max number of objects per page
+
+  # Pages have a header with information, so we have to take that in to account
+  obj_start_address = page_address + SIZEOF_HEAP_PAGE_HEADER_STRUCT
+
+  # If the object start address isn't evenly divisible by the size of a
+  # Ruby object, we need to calculate the padding required to find the first
+  # address that is divisible by SIZEOF_RVALUE
+  if obj_start_address % SIZEOF_RVALUE != 0
+    delta = SIZEOF_RVALUE - (obj_start_address % SIZEOF_RVALUE)
+    obj_start_address += delta # Move forward to first address
+
+    # Calculate the number of objects this page can actually hold
+    limit = (HEAP_PAGE_SIZE - (obj_start_address - page_address)) / SIZEOF_RVALUE
+  end
+
+  Page.new page_address, obj_start_address, limit
+end
+Now that we can get information about the page where the object is stored, lets examine page information for the object addresses we were working with in the previous example.
+
+page_address = page_address_from_object_address(0x7fcc6c8367e8)
+p page_info(page_address)
+# => #<struct Page address=140515970596864, obj_start_address=140515970596880, obj_count=408>
+
+page_address = page_address_from_object_address(0x7fcc6c836838)
+p page_info(page_address)
+# => #<struct Page address=140515970596864, obj_start_address=140515970596880, obj_count=408>
+
+page_address = page_address_from_object_address(0x7fcc6c847b88)
+p page_info(page_address)
+# => #<struct Page address=140515970662400, obj_start_address=140515970662440, obj_count=407>
+The first two objects live on the same page, and that page can store 408 objects. The third object lives on a different page, and that page can only store 407 objects.
+
+It may not seem like it, but we now have all of the key pieces of information we need in order to visualize the contents of our heap.
+
+Data Acquisition
+In order to visualize a heap, we actually need a heap to visualize. I will use ObjectSpace to dump the heap to a JSON file, and we’ll used the code from above along with a JSON parser and ChunkyPNG to generate a graph.
+
+Here is our test program:
+
+require 'objspace'
+
+x = 100000.times.map { Object.new }
+GC.start
+File.open('heap.json', 'w') { |f|
+  ObjectSpace.dump_all(output: f)
+}
+All it does is allocate a bunch of objects, GC, then dump the heap to a JSON file called heap.json. Each line in the JSON document is one object in the Ruby heap.
+
+Now lets write a program to process the JSON file. What we’ll do is change the Page class so that it can keep track of objects that are living on that page, then iterate over the JSON document and add each object to its respective page.
+
+class Page < Struct.new :address, :obj_start_address, :obj_count
+  def initialize address, obj_start_address, obj_count
+    super
+    @live_objects = []
+  end
+
+  def add_object address
+    @live_objects << address
+  end
+end
+
+# Keep track of pages
+pages = {}
+
+File.open("heap.json") do |f|
+  f.each_line do |line|
+    object = JSON.load line
+
+    # Skip roots. I don't want to cover this today :)
+    if object["type"] != "ROOT"
+      # The object addresses are stored as strings in base 16
+      address      = object["address"].to_i(16)
+
+      # Get the address for the page
+      page_address = page_address_from_object_address(address)
+
+      # Get the page, or make a new one
+      page         = pages[page_address] ||= page_info(page_address)
+
+      page.add_object address
+    end
+  end
+end
+Visualizing the Heap
+So far our processing program has divided the objects up by which pages they belong to. Now it’s time to turn that data in to a visualization of the heap. Unfortunately, we have one slight problem: the heap dump gave us information about live objects in the system. How can we visualize empty spaces in the heap?
+
+We have a few bits of information we can use to figure out where the empty spots are in our heap. First, we know that object addresses are divisible by 40. Second, we know which address is the first address for storage (Page#obj_start_address). Third, we know how many objects a page can store (Page#obj_count). So if we start at obj_start_address, and increment by SIZEOF_RVALUE, we should either find that we read that address from the JSON file, or not. If we read the address from the JSON file, we know it’s a live object, if not, then it’s an empty slot.
+
+So lets add a method to the Page object that iterates over the possible object addresses on the page, and yields :full if there is an object, or :empty if there is no object:
+
+class Page < Struct.new :address, :obj_start_address, :obj_count
+  def each_slot
+    return enum_for(:each_slot) unless block_given?
+
+    objs = @live_objects.sort
+
+    obj_count.times do |i|
+      expected = obj_start_address + (i * SIZEOF_RVALUE)
+      if objs.any? && objs.first == expected
+        objs.shift
+        yield :full
+      else
+        yield :empty
+      end
+    end
+  end
+end
+Now, from page to page, we’re able to differentiate empty slots from full slots. Lets use ChunkyPNG to generate a PNG file where each column in the PNG represent one page, and each 2 x 2 pixel square in each page represents an object. We’ll color the object red if it’s full, but just leave it empty if it’s empty:
+
+require 'chunky_png'
+
+pages = pages.values
+
+# We're using 2x2 pixel squares to represent objects, so the height of
+# the PNG will be 2x the max number of objects, and the width will be 2x the
+# number of pages
+height = HEAP_PAGE_OBJ_LIMIT * 2
+width = pages.size * 2
+
+png = ChunkyPNG::Image.new(width, height, ChunkyPNG::Color::TRANSPARENT)
+
+pages.each_with_index do |page, i|
+  i = i * 2
+
+  page.each_slot.with_index do |slot, j|
+    # If the slot is full, color it red
+    if slot == :full
+      j = j * 2
+      png[i, j] = ChunkyPNG::Color.rgba(255, 0, 0, 255)
+      png[i + 1, j] = ChunkyPNG::Color.rgba(255, 0, 0, 255)
+      png[i, j + 1] = ChunkyPNG::Color.rgba(255, 0, 0, 255)
+      png[i + 1, j + 1] = ChunkyPNG::Color.rgba(255, 0, 0, 255)
+    end
+  end
+end
+
+png.save('heap.png', :interlace => true)
+After running this, we should have a file output called heap.png. Here’s the one I generated:
+
+filled heap
+
+This one doesn’t look as neat because we filled the heap up. Lets try dumping the heap from a relatively empty process and see what it looks like:
+
+$ ruby -robjspace -e'File.open("heap.json", "wb") { |t| ObjectSpace.dump_all(output: t) }'
+If I process this heap, the output looks like this:
+
+empty heap
+
+Ok that’s the end. Thank you!
+
+You can find the full code listing from this post here.
+
+<3<3<3<3<3
+
+read more »
+Object ID in MRI
+2017-02-01 @ 09:41
+Objects in Ruby are 40 bytes. Objects are allocated in to pages (or arenas) that are 2^14 (2 to the 14th power) bytes. Pages are allocated with an aligned malloc where the divisor is the size of a page. The first object is allocated at the first address inside the page that is divisible by 40 (or page_start + (40 - page_start % 40) % 40). This means all Ruby object addresses are divisible by 40, and that some pages hold one more object than others.
+
+page layout
+
+The code to find the “first object inside the page” can be found here. If the page address isn’t divisible by 40, this calculates the first offset inside the page where an object can be allocated. Objects are allocated at 40 byte offsets in order to support tagged pointers.
+
+Tagged pointers
+Every number divisible by 40 when represented in binary always ends in three 0s:
+
+irb(main):012:0> sprintf("%0#15b", 80)
+=> "0b0000001010000"
+irb(main):013:0> sprintf("%0#15b", 120)
+=> "0b0000001111000"
+irb(main):014:0> sprintf("%0#15b", 160)
+=> "0b0000010100000"
+irb(main):015:0> sprintf("%0#15b", 200)
+=> "0b0000011001000"
+MRI exploits this fact in order to represent some objects like integers without allocating anything. Pointers are just numbers, so if the number is not divisible by 40 (in other words doesn’t end in 000), then we know it is something special.
+
+Integers are examples of tagged pointers. Integers are encoded by shifting the number left one, then setting the last bit to 1. So the number 1 will be encoded as 3 (or in binary 11), and the number 40 will be encoded as 81 (or 1010001 in binary). If the pointer we’re dealing with has a 1 in the last bit, we know it’s a Ruby integer, and we can decode it (convert to a C integer) by shifting right 1.
+
+Just to reiterate, a Ruby integer 20 (0b10100), is encoded to 41 (0b101001) by shifting left, then adding 1.
+
+So C integers are converted to Ruby integers by shifting left by one, then adding one. Ruby integers are converted to C integers by shifting right by one. This is one reason why Ruby can’t represent a full 64bit number as an “immediate” value. One bit is used for encoding (the other bit is used for the sign).
+
+A diagram of the tagging scheme is here.
+
+Calculating Object ID
+“Non special objects” are objects that don’t use the 3 bits on the right side for any meaning. An example of a “non special object” would be Object.new.
+
+Non special objects encode their object id as their address in memory + 1. The encoding code is here. Normally, to convert a C integer to a Ruby integer, the integer is shifted left, then add one. But the address of a non special Ruby object will always be divisible by 40, so we know that the last bit is 0. So this code simply changes the last bit from a 0 to a 1. Clobbering the last bit means that when Ruby side of the program see it, it will be the address of the object shifted right by one.
+
+If object X is at memory location 40, then the object id (in Ruby) will be 20. The Ruby integer 20 (0b10100) is encoded by shifting left then adding one, which results in 41 (0b101001). Since this code simply takes the location (in this case 40) and adds one, the result is 41 (0b101001) which is the same as 20 on the Ruby side.
+
+In other words, object_id returns the address of the object shifted right one and we can get the actual address of the object back by shifting left one.
+
+Calling inspect shows the actual address as hex. We can see that shifting left one, then converting to hex will give us the same number:
+
+irb(main):021:0> x = Object.new
+=> #<Object:0x00000100827400>
+irb(main):022:0> x.object_id.to_s(16)
+=> "80413a00" # not what we want
+irb(main):023:0> (x.object_id << 1).to_s(16)
+=> "100827400" # this is it!
+Calculating Page Number
+We can use the address of an object to calculate the arena (or page) in to which the object was allocated. Pages are aligned at 2^14, so the page header will always be divisible by 2^14. The page size is never larger than 2^14, so any offset inside the page will not be evenly divisible by 2^14. Knowing this, we can remove the lower bits of the object by using a mask that is 14 bits wide:
+
+irb(main):001:0> MASK = ~(0) << 14
+=> -16384
+irb(main):002:0> 10.times { p (Object.new.object_id << 1) & MASK }
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+4305141760
+Now we can group objects by what page they were allocated on.
+
+The End.
+
+read more »
+Archives
+Copyright © 2021 Tenderlovemaking.com All rights reserved.
