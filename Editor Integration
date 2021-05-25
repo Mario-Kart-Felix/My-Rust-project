@@ -1,0 +1,33 @@
+To get the most out of Prettier, it’s recommended to run it from your editor.
+
+If your editor does not support Prettier, you can instead run Prettier with a file watcher.
+
+Note! It’s important to install Prettier locally in every project, so each project gets the correct Prettier version.
+
+Visual Studio Code
+prettier-vscode can be installed using the extension sidebar – it’s called “Prettier - Code formatter.” Check its repository for configuration and shortcuts.
+
+If you’d like to toggle the formatter on and off, install vscode-status-bar-format-toggle.
+
+Emacs
+Check out the prettier-emacs repo, or prettier.el. The package Apheleia supports multiple code formatters, including Prettier.
+
+Vim
+vim-prettier is a Prettier-specific Vim plugin. Neoformat, ALE, and coc-prettier are multi-language Vim linter/formatter plugins that support Prettier.
+
+For more details see the Vim setup guide.
+
+Sublime Text
+Sublime Text support is available through Package Control and the JsPrettier plug-in.
+
+JetBrains WebStorm, PHPStorm, PyCharm...
+See the WebStorm setup guide.
+
+Visual Studio
+Install the JavaScript Prettier extension.
+
+Atom
+Atom users can install the prettier-atom package, or one of the more minimalistic mprettier and miniprettier packages.
+
+Espresso
+Espresso users can install the espresso-prettier plugin.
