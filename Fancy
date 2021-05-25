@@ -1,0 +1,2266 @@
+# Don't put devise into Rails concern
+
+...or OMG my devise is authenticating everyone
+
+
+Your application with Devise based authentication successfully grow. So you decided to clean bunch of stuff into (rails concerns)[http://api.rubyonrails.org/classes/ActiveSupport/Concern.html] (you should really do that when your file have more than 100 lines). So here is our model:
+
+
+    ### lang:ruby
+    class User < ActiveRecord::Base
+      devise :invitable, :database_authenticatable, :recoverable, :trackable, :validatable, :lockable, :timeoutable
+
+      include User::SomeOtherConcern
+
+      #devise stuff
+
+      def active_for_authentication?
+        # devise method that will disallow user to login if false
+        closed? ? false : super
+      end
+
+      def inactive_message
+        closed? ? :account_closed : super
+      end
+
+      def closed?
+        #boolean flag that will determine if user account was closed manually by admin, for demonstration let everyone be closed
+        true
+      end
+
+      # .... some other code
+    end
+
+good stuff so far so let's create concern for the Devise gem stuff. The new Rails convention is to put your concerns to `app/models/concerns/` folder however my concern is related to just one model,  therefore it makes more sence  to put it in  a folder with the same name as model, in this case `app/models/user/`
+
+so lets `vim app/model/user/devise_authentication_concern.rb` and put this code in it:
+
+    ### lang:ruby
+    module User::DeviseAuthenticationConcern
+      extend ActiveSupport::Concern
+
+      included
+        devise :invitable, :database_authenticatable, :recoverable, :trackable, :validatable, :lockable, :timeoutable
+      end
+
+      def active_for_authentication?
+        return false if closed?
+      end
+
+      def inactive_message
+        closed? ? :account_closed : super
+      end
+
+    end
+
+and refactor our user model `app/models/user.rb` to
+
+    ### lang:ruby
+    class User < ActiveRecord::Base
+
+      include User::DeviseAuthenticationConcern
+      include User::SomeOtherConcern
+
+      def closed?
+        true
+      end
+
+      # .... some other code
+    end
+
+Pretty pretty !
+
+If you try it out (without test) nothing seems to be broken....except: even closed users can log in :(
+Hmm. Well long (debugging) story short, turns out that Devise modules and your concern  module will be loaded in wrong order (your concern methods first Devise last => Devise will override yours), therefore our concern is useless.
+
+You have to keep the `devise :invitable, :database_authenticatable, :recoverable, :trackable, :validatable, :lockable, :timeoutable` inside your User model (even if you try `def self.included(base)`  in your concern, it wont work)
+
+so the final functional code:
+
+model `app/models/user.rb`
+
+    ### lang:ruby
+    class User < ActiveRecord::Base
+
+      devise :invitable, :database_authenticatable, :recoverable, :trackable, :validatable, :lockable, :timeoutable # first
+
+      include User::DeviseAuthenticationConcern  # second
+      include User::SomeOtherConcern
+
+      def closed?
+        true
+      end
+
+      # .... some other code
+    end
+
+model concern `app/models/user/devise_authentication_concern.rb`
+
+    ### lang:ruby
+    module User::DeviseAuthenticationConcern
+      extend ActiveSupport::Concern
+
+      def active_for_authentication?
+        return false if closed?
+      end
+
+      def inactive_message
+        closed? ? :account_closed : super
+      end
+    end
+
+ta-da
+
+
+
+
+# Ruby logical and binary operators and how to not get screwed by their variations
+
+...or: Sheldon Cooper presents: "Fun with Ruby logical and binary operators!" :)
+
+In Ruby like any other programing language you have logical operators such as `&&`, `||` or their word representation `and` `or`
+
+`and` is basically alias to `&&` and `or` is alias to `||`. If you're following community [ruby style guide](https://github.com/bbatsov/ruby-style-guide), like I'm trying to do, you should be just using `&&` and `||`. To be honest I personally prefer to type `and` and `or`, plus I agree  with just 97% with the style guide content, but there is a benefit to sacrifice certain conveniences in the name of clean code ( [another argument for && and ||](http://www.rubyinside.com/and-or-ruby-3631.html) ] ).
+
+Back to our topic.
+So in Ruby you can do:
+
+     true and false
+     #=> false
+
+     true or false
+     #=> true
+
+     true && false
+     #=> false
+
+     true || false
+     #=> true
+
+So far nothing fancy
+Ruby has also binary operanors like `&` and `|`
+
+     true & false
+     #=> false
+
+     true | false
+     #=> true
+
+
+Still boring, I know but bear with me.
+Most of Rubyst know that you can do fancy stuff like this:
+
+    5 || 2
+    # => 5     # Value on the left side is present so return it
+
+    nil || 2
+    #=> 2     # Value on the left side is nil so return right side
+
+    a = nil || 2
+    #=> 2     # Value on the left side is nil so set variable with right side
+    a
+    #=> 2
+
+    b = nil
+    #=> nil
+
+    b
+    #=> nil
+
+    b ||= 4
+    #=> 4     # similar to b = nil || 4
+
+    b
+    #=> 4
+
+    b ||= 22
+    #=> 4     # similar to b = 4 || 22
+
+    b
+    #=> 4
+
+...but not lot of them know you can do stuff like this:
+
+    5 && 2
+    #=> 2
+ 
+    2 && 10
+    #=> 10
+
+    [20] && [40]
+    # => [40]
+
+    'string' && 1.23
+    #=> 1.01
+
+Basically when I'm comparing  two value objects (numbers, strings ...) with `&&` or `and` I'm saying: "Give me the other value than the one that".
+
+You could think about `&&`  as a reverse `||` operator in this contcept. Same apply for comparing `nil`:
+
+    nil && 2 
+    #=> nil
+
+    2 && nil
+    #=> nil
+
+Getting interesting. You can do `&&=` similar as you can do `||=` and guess what, it behaves exactly the opposit way
+
+    a = 10
+    # => 10
+
+    a &&= 5
+    # => 5
+
+    a
+    # => 5
+
+    a &&= nil
+    # => nil
+
+
+
+## Don't confuse ruby array operators alike methods with ruby logical operators !!
+
+The main reason why I event started to write this article is Ruby array method `&`. Yes I'm saying method not operator and to prove this try:
+
+    [] & [10]
+    # => []
+
+    [].& [10]
+    # => []
+
+    "aaa".& 10
+    # NoMethodError: undefined method `&' for "aaa":String
+
+...of course you can do 
+
+    true.& false
+    # => false
+
+...but you cannot do:
+
+    true.&& false
+    # SyntaxError:
+
+...and the reason for that the `&` is a method, that  behaves as a binary operator when called upon  boolean object. While `&&` is "the real thing" operator. People who understand Ruby well are bored to death if reading this article. The reason for that is they know you can define method with any ascii-char name (except some cases) :
+
+    "aaa".& 10
+    # still NoMethodError: undefined method `&' for "aaa":String
+
+    class String
+      # monkey patch. Don't do this in real world, use ruby mixins insted
+      def &(right_side)
+        # do something meaningfull
+        right_side
+      end
+    end
+
+    "aaa".& 10
+    # => 10     # ta-da!
+
+
+...and since `ruby 1.9.x` with any utf-8 name:
+
+    class Float
+      # monkey patch. Don't do this in real world, use ruby mixins insted
+      def self.π  # this wont work in ruby 1.8.x
+        3.14
+      end
+    end
+
+
+So if you were ever playing with console and did something like this:
+
+   [1,2,3,4] & [2,3]
+   # => [2,3]
+
+you were actually doing 
+
+   [1,2,3,4].&([2,3])
+   # => [2,3]
+
+[Ruby reference for Array "&" instance method](http://ruby-doc.org/core-2.0/Array.html#method-i-26)
+
+Same goes for `+`, `-`, etc.
+
+   [1,2,3,4] - [2,3]
+   # => [1,4]
+
+   [1,2,3,4].-([2,3])
+   # => [1,4]
+
+   [1,2] + [3]
+   # => [1,2,3]
+
+   [1,2].+([3])
+   # => [1,2,3]
+
+So when you write ` object & object ` or ` object | object` you shouldn't think about the syntax as binary operator that  magically behaves differently when comparing two non-boolean objects (e.g.: array objects), but as a method that behaves as a binary operator when called upon boolean objects (e.g.: `true & false`) and as a method that return values exist in both arrays (e.g.: `[1,2] & [2]`)
+
+
+ruby: 2.0.0p195
+source: http://www.tutorialspoint.com/ruby/ruby_operators.htm , http://ruby-doc.org/core-2.0/Array.html#method-i-26 http://stackoverflow.com/questions/17190996/are-rubys-logical-operator-methods-like-binary-operators
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# how to stub out Rails scope while keeping rest of code functionality 
+
+
+let say we have a class 
+
+    class BackupDecorator
+      def ability
+       #some logic to do with CanCan or other access restricting gem
+      end 
+
+      def do_something
+        Backup.where( document_id: [1,2,3, nil] ).accessible_by(ability)
+      end
+
+    end
+
+To write spec **without constructiong ability** you could just do something like this 
+
+    require 'spec_helper'
+    describe BackupDecorator
+      let(:buckup){ FactoryGirl.create :buckup }
+      let(:backup_decorator){BackupDecorator.decorate(buckup)}
+
+      describe 'do_something'
+        subject{ backup_decorator.do_something }
+
+        it 'should get backups for  global and individual documents' do
+          res = double(:res)
+
+          Backup.should_receive(:where).with( [1,2,3, nil]).and_return(res)
+          res.should_receive(:accessible_by).with(backup_decorator.ability).return(['something'])
+          should eq ['something']
+        end
+      end
+    end
+
+
+or maybe something with 
+
+    Backup.should_receive(:where).with( [1,2,3, nil]).and_call_original
+
+but in both cases this is hardcore-ishly narrowing  your expectation. For small method like this it's ok. But let say I have method with eight chained scopes what then ?
+
+In specs like this I don't really  care about what will `accessible_by` scope return (I have ability class specs for that). All I want to test if global and individal documents are included. So pretty much I would like to skip that `accessible_by` scope and let rest of the code do it's job
+
+skip `accessible_by` scope:
+
+      describe 'do_something'
+        subject{ backup_decorator.do_something }
+        let(:backup_for_doc_1){  FactoryGirl.create :backup, document_id: 1 }
+        let(:backup_for_global){ FactoryGirl.create :backup, document_id: nil }
+
+        before do
+          Backup.stub_chain(:accessible_by) { Backup.order(Backup.arel_table[:id)) } #ignore accessible by
+        end
+
+        it 'should get buckups for  global and individual documents' do
+          should include backup_for_doc_1
+          should include backup_for_global
+        end
+      end
+
+
+
+however you must be careful in what context you call `stub_chain' because it may backfire 
+
+    class CandyDecorator
+      scope :are_not_deleted, lambda{ where(deleted_at: nil) }
+
+      def ability
+       #some logic to do with CanCan or other access restricting gem
+      end 
+
+      def do_something
+        favorite_candies.are_not_deleted.accessible_by(ability)
+      end
+
+      def favorite_candies
+        #returns relation scope
+        Candy.where(id: [1, 3] )
+      end
+    end
+
+
+    describe CandyDecorator do
+      let1!(:candy ){ FactoryGirl.create :candy }
+      let2!(:candy2){ FactoryGirl.create :candy }
+      let(:decorated_candy){ CandyDecorator.decorate(candy) }
+
+      before do
+        Candy.stub_chain(:accessible_by) { Candy.group(:id) } #ignore accessible by
+      end
+
+      describe :do_something do
+        subject{ decorated_candy.do_something }
+        let(:favorite_candies){ Candy.where(id: [candy.id])} # must be relation,  cannot be Array
+
+        before do
+          decorated_candy.stub(:favorite_candies).and_return(favorite_candies)
+        end
+
+        it "should include chosen candy" do
+          should     include candy  # RSpec success 
+        end
+
+        it "should not include unchosen candy" do
+          should_not include candy  # RSpec failture, => should not be included but was 
+        end
+      end
+    end
+
+What the hell just happened here ?
+
+To be honest I'm not quite sure, but it got something to do with stubbing chain itself. See,  our method `do_something` is working with `favorite_candies` method which is stubbed in different context. So long story short we want sql query like this:
+
+    "SELECT `candies`.* FROM `candies`  WHERE `candies`.`id` IN (2160) AND (`candies`.`deleted_at` IS NULL) GROUP BY id"
+
+but we ended up with 
+
+    "SELECT `candies`.* FROM `candies`  WHERE (`candies`.`deleted_at` IS NULL) GROUP BY `candies`.`id`"
+
+...so our `Candy.where(id: [candy.id])` was ignored when arel was constructing the SQL
+
+There is actually easy (and logical) fix, don't stub your class, stub your chain 
+
+
+
+    describe CandyDecorator do
+      let1!(:candy ){ FactoryGirl.create :candy }
+      let2!(:candy2){ FactoryGirl.create :candy }
+      let(:decorated_candy){ CandyDecorator.decorate(candy) }
+
+      describe :do_something do
+        subject{ decorated_candy.do_something }
+        let(:favorite_candies){ Candy.where(id: [candy.id])} # must be relation,  cannot be Array
+
+        before do
+          decorated_candy.stub(:favorite_candies).and_return(favorite_candies)
+          favorite_candies.stub_chain(:accessible_by){ Candy.group(:id) }
+        end
+
+        it "should include chosen candy" do
+          should     include candy  # RSpec success
+        end
+
+        it "should not include unchosen candy" do
+          should_not include candy  # RSpec success
+        end
+      end
+    end
+
+
+date: 2013-05-22
+rails: 3.2.13
+
+
+--------------------------------------------------
+
+
+# Rails "read attribute"
+
+~~~ruby
+ a= Document.last
+ a[:name])   #=> "foooo"
+ a.read_attribute(:name)   #=> "foooo"
+ a.write_attribute(:name, 'bar')   #=> DB field become "bar"
+~~~
+
+usage
+
+~~~ruby
+define_method :name do
+  if something = true
+    #..
+  else
+    self.read_attribute(:name)
+  end
+end
+
+~~~
+
+
+
+
+
+
+# CoffeeScript and global classes
+
+By default everything is global in JavaScript unless you use var. CoffeeScript fix this. But what if you want to access class declarated with CoffeeScript from Fire bug console ?
+
+declaration like this wont work
+
+     # app/assets/javascript/document_form.coffee
+     Class DocumentForm
+
+firebug output:
+
+     >>> DocumentForm
+     ReferenceError: DocumentForm is not defined[Break On This Error]
+     DocumentForm
+
+
+but if you do 
+
+
+     Class window.DocumentForm
+     >>> DocumentForm
+     DocumentForm()
+
+
+...if you don't want to expose your class to be global, but rather want the instance,  you can do this
+
+     # app/assets/javascript/document_form.coffee
+     Class DocumentForm
+     window.documentForm = new DocumentForm
+
+
+
+
+date: 2013-01-11
+
+
+
+
+
+
+
+# attribute selectors 
+
+    ul li
+    ul > li #direct child
+    .foo + .foo
+    h2 ~ p  #  after first appearenc of h2, p will have this style
+
+
+##has attribute selector 
+
+    img[alt]  # all tags that have alt tag
+    <img src="" alt="ooo'>  #yes
+    <img src="">  #no
+
+##has specific attribute selector 
+
+    img[alt=ooo]  # all tags that have alt tag
+    <img src="" alt="ooo">  #yes
+    <img src="" alt='bbb'>  #no
+
+##hyphen search (slug selector)
+
+    div[class|=widget] # looks for word "widget" separated by hyphen
+    <div class="homepage-widget-24"></div>   #yes
+    <div class="homepage-widget-12"></div>   #yes
+    <div class="homepagewidget12"></div>     #no
+
+##character match search
+
+    div[class*=get] # looks for  "get" 
+    <div class="homepage-widget-24"></div>   #yes
+    <div class="homepage-widget-12"></div>   #yes
+    <div class="homepagewidget12"></div>     #yes
+
+## begin with selector
+
+    a[href^="mailto:"]
+    <a href="/foo.html"></a>  #no 
+    <a href="mailto:qqq@eq8.eu"></a> #yes
+
+## end with selector
+
+    a[href$="pdf"]
+    <a href="/foo.pdf"></a> #yes
+
+
+## pseudo class selector
+
+### first-child
+
+    p:first-child
+    <div> 
+      <p>yes</p>
+      <p>no</p>
+    </div>
+
+note: if you have html comment, IE will recognize that as first child :-\ 
+
+### last-child
+
+    li:last-child
+
+    <div> 
+      <ul>
+        <li>no</li>
+        <li>no</li>
+        <li>yes</li>
+      </ul>
+    </div>
+
+    # but !!!
+    <div> 
+      <ul>
+        <li>no</li>
+        <li>no</li>
+        <li>no</li>
+        <p></p>
+      </ul>
+    </div>
+
+    #fucked up but yes, it may seems that you saying "the last li",  but  you are actually saying "last child and is div"
+
+note: first child is in IE8 but last-child not 
+
+### nth-child
+
+     tr:nth-child(odd) { /* can be odd, even or equasion */ }
+
+     <table>
+        <tr><td>yes</td></tr>
+        <tr><td>no</td></tr>
+     </table>
+
+     #the equasion
+     tr:nth-child(3n)
+     3x0 = 0 (no selected)
+     3x1 = 3rd element (selected)
+     3x2 = 6th element (selected)
+
+     tr:nth-child(3n+1)
+     3x0 +1 = 1 (selected)
+     3x1 +1 = 4th element (selected)
+     3x2 +1 = 7th element (selected)
+
+     tr:nth-child(3n-1)
+     3x0 - 1 = 0 
+     3x1 - 1 = 2nd element (selected)
+     3x2 - 1 = 5th element (selected)
+
+
+     tr:nth-child(n+5)
+     0+5     = 5th element selected
+     1+5     = 6th element selected
+     2+5     = 7th element selected
+
+     #not suported IE8 and below
+
+
+### nth-last-child
+
+similar like *nth-child* but starts at the bottom
+
+     div:nth-last-child(3n)
+
+
+##psudo selectors on form
+
+    input:checked + label
+    input[type="text"]:disabled
+    input:required
+    input:optional
+    input:valid
+    input:invalid
+
+
+##not()
+
+    input:not(type="radio"]):not(type="checkbox")
+    <input type="email">      #yes
+    <input type="checkbox">   #no
+
+
+## pseudo elements
+
+interestingly pseudo elements (by spec) should be with two colons  `::before`. But because of IE8 where pseudo elements work with single colon `:before` all other major browsers suport both `::` and `:` for pseudo element
+
+### :before and :after
+
+      <element><:before><content><:after></element>
+
+### webkit validation form pseudo element bubbles for html5 form
+
+    ::-webkit-validation-buble
+    ::-webkit-validation-buble-top-outer-arrow
+    ::-webkit-validation-buble-top-inner-arrow
+    ::-webkit-validation-buble-message
+
+
+
+## fallback
+
+    #css
+    .menu li:last-child{}
+    .menu li.last{}
+
+    # jQuery
+    $('.menu li:last-child').addClass('last')
+
+
+or check [IE9.js](http://code.google.com/p/ie7-js/)
+
+
+
+source http://2011.html5tx.com/videos/smith
+date: 2012-12-27
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Rake task not loading modles,...or dumb-ass you forget about environment
+
+One beautiful freazing Thursday morning in London, I decided that I'll do one quick MySQL performance test for Rails application. It was really simple test and for preparation I had to do is to populate some dummy data to my test database with rake task.
+
+So in my `lib/tasks/foo.rake`
+
+    require 'factory_girl'
+    desc 'just dummy data'
+    task :foo do
+
+      FactoryGirl.find_definitions
+      70000.times do
+        FactoryGirl.create  :document_ownership, :specific_client
+        FactoryGirl.create  :document_ownership, :all_clients
+      end
+    end
+
+simple enough. But no matter how hard I try to do `rake foo` it was throwing 
+
+    uninitialized constant DocumentOwnership  # or any other model name
+
+
+So ? Laughing now?  ... Yes I forgot to add enviroment !!!
+
+    #...
+    task :foo => :environment do
+      #...
+
+basically `:environment` will tell my rake what config files to load, therfore it will load my models as well
+
+date: 2012-12-13
+
+
+
+
+
+------------------------------------------------------------------
+
+
+# what is good about array.extract_options! ?
+
+    a = [1, 2, {:a => :b}]
+    my_options = a.extract_options!
+    # my_options == {:a=>:b}
+    a
+    #=> [1, 2]
+
+
+
+resources: [extract options API](http://apidock.com/rails/ActiveSupport/CoreExtensions/Array/ExtractOptions/extract_options!)
+
+date: 2012-12-12
+
+------------------------------------------------------------------
+
+# jQuery check if radio button is checked
+
+     # approach 1
+     $('.global_ownerships input[type=radio][value=true][checked=checked]')
+     $('.global_ownerships input[type=radio][value=false][checked=checked]')
+
+     # approach 2
+     $('input[type=radio][value=false]').is(':checked')
+     $('input[type=radio][value=true]').is(':checked')
+
+## how to check input button
+
+    $('.myCheckbox').prop('checked', true);
+    $('.myCheckbox').prop('checked', false);
+
+alternative
+
+    $('.myCheckbox').attr('checked', 'checked');
+    $('.myCheckbox').removeAttr('checked');
+
+however I found that sometimes this doesn't work, rather use the `prop` check http://stackoverflow.com/questions/5874652/prop-vs-attr 
+
+date: 2012-12-11
+
+---------------------------------------------------------------
+
+# accessing object instance variables from string in coffeescript and javascript
+
+Let say I have CoffeeScript (or just JavaScript) class and I want to dynamically access instance variables from string. You can use JavaScript [eval](), however that is not recommended ( [SO question on this topic](http://stackoverflow.com/questions/1199110/whats-a-more-secure-alternative-for-eval-when-i-just-want-to-call-a-function), [Eval is evil article](http://blogs.msdn.com/b/ericlippert/archive/2003/11/01/53329.aspx) )
+
+Fortunately JavaScript provides *square bracket* way of accessing variables and methods
+
+    class DocumentNameForm
+      constructor: (@name) ->
+        @my_foo  = $(".foo input")
+        @my_bar  = $(".bar input")
+
+      watch_for_change: ->
+        instance = this
+        for option in ['foo', 'bar']
+          do (option) ->
+            console.log  "my_#{option}"          #just debugging
+            console.log instance["my_#{option}"] #just debugging
+
+            #easy enough 
+
+            instance["my_#{option}"].change ->
+              $(this).attr('disabled', 'disabled')
+
+
+if you need to call dynamically call method from string you can do it as described in [this SO answer](http://stackoverflow.com/questions/1199110/whats-a-more-secure-alternative-for-eval-when-i-just-want-to-call-a-function)
+
+    object["set" + $fieldID].call(object, $fieldValue);
+    object["set" + $fieldID].apply(object, [$fieldValue]);
+
+
+date: 2012-12-11
+
+-----------------------------------------------------------
+
+# Removing associations won't trigger after_destroy callback
+
+
+Let say you have a model 
+
+~~~ruby
+class Foo < ActiveRecord::Base
+  belongs_to :bar
+
+  after_destroy :be_happy
+
+  def be_happy
+    p 'Happpyyyy ! "
+  end
+
+end
+
+class Bar < ActiveRecord::Base
+  has_many :foos
+end
+~~~
+
+...so when you do 
+
+~~~ruby
+    bar = Bar.last
+    bar.foos = []
+~~~
+
+... you remove all foos associations, and expect that `be_happy` is triggered.
+
+Unfortunately this isn't true. As you can read [here](http://guides.rubyonrails.org/association_basics.html#association-callbacks), Rails is removing association directly by association_id. So you aren't actually destroying individual records, but directly removing them from Database.
+
+There is a way around, by using [Association callbacks](http://guides.rubyonrails.org/association_basics.html#association-callbacks).
+
+~~~ruby
+    class Foo < ActiveRecord::Base
+      belongs_to :bar
+
+      after_destroy :be_happy
+
+      def be_happy
+        p 'Happpyyyy ! "
+      end
+
+    end
+
+
+    class Bar < ActiveRecord::Base
+      has_many :foos, after_remove: :make_associations_happy
+
+      def make_associations_happy(foo)
+        foo.be_happy
+      end
+    end
+~~~
+
+resources: [SO has many association don't call after destroy](http://stackoverflow.com/questions/11340378/activerecord-has-many-association-doesnt-call-after-destroy-when-setting-a-coll) , [Rails association callbacks](http://guides.rubyonrails.org/association_basics.html#association-callbacks)
+date: 2012-12-07
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Working with SimpleForm collection_radio_buttons helper
+
+date:2012-11-08
+
+Today I needed to do collection of options for search form, but I didn't want the html include unnecessary stuff that SimpleForm gives, so I decided to use [recomended](https://github.com/plataformatec/simple_form#collection-radio-buttons) collection_radio_buttons helper.
+
+
+note: I'm using this in combination with [Ransack](https://github.com/ernie/ransack), that's why the *q* parameter, ...oh and the syntax is HAML
+
+    = simple_form_for @search, method: 'get', url: documents_path do |f|
+      = f.collection_radio_buttons :latest_true, [[0, 'All'] ,[1, 'Latest only']], :first, :last, {collection_wrapper_tag: :div, collection_wrapper_class: 'latest_or_all_documents_radio', checked: (params['q'] ? params['q']['latest'] : 0)  }
+
+
+[simple form reference for collection_radio_buttons helper](http://rubydoc.info/github/plataformatec/simple_form/master/SimpleForm/ActionViewExtensions/Builder#collection_radio_buttons-instance_method)
+  
+     (Object) collection_radio_buttons(attribute, collection, value_method, text_method, options = {}, html_options = {}) 
+
+
+generated html: 
+
+    <div class="latest_or_all_documents_radio">
+      <span>
+        <input id="q_latest_true_0" name="q[latest_true]" value="0" type="radio">
+        <label class="collection_radio_buttons" for="q_latest_true_0">All</label>
+      </span>
+      <span>
+        <input checked="checked" id="q_latest_true_1" name="q[latest_true]" value="1" type="radio">
+        <label class="collection_radio_buttons" for="q_latest_true_1">Latest only</label>
+      </span>
+    </div>
+
+
+
+
+---------------------------------------------------------------
+
+
+
+
+
+
+
+# Factory girl causing rake db:migrate failure
+
+I got this factory:
+
+~~~ruby
+# spec/factories/posts.rb 
+
+FactoryGirl.define do
+  factory :post do
+    title   "My ultra cool post"
+    content "Lorem ipsum"
+    association :author, :factory => :user
+
+    trait :owned_by_provider do
+      some_other_description  'Foo'
+      providers  [ FactoryGirl.create( :provider )]
+    end
+  end
+end
+~~~
+
+...on migrated database it was working correctly, however on clean database (without migrations) throwing this error:
+
+    rake db:migrate RAILS_ENV=test
+    rake aborted!
+    Mysql2::Error: Table 'cool_project_developtent.providers' doesn't exist: SHOW FULL FIELDS FROM `providers`
+
+The solution is to put association in *{}* lambda block so it won't get evaluated during rake initialization...
+
+
+FactoryGirl.define do
+  factory :post do
+    title   "My ultra cool post"
+    content "Lorem ipsum"
+    association :author, :factory => :user
+
+    trait :owned_by_provider do
+      some_other_description  'Foo'
+      providers {  [ FactoryGirl.create( :provider )] }
+    end
+  end
+end
+~~~
+
+-----------------------------------------------------------------
+
+
+
+
+# passing CoffeeScript variable to ERB
+
+in rails 3.1 and up, you can use CoffeeScript by default. 
+
+*app/assets/javascript/my.coffee*
+
+    foo = 123
+    alert foo
+
+you can also pass ERB variables to CoffeeScript files with by just extending file extension to .erb
+
+*app/assets/javascript/my.coffee.erb*
+
+    foo = <%= 120 + 3 %>
+    alert foo
+
+you can easily use Rails url helpers in your coffee script files by extending files with url helpers
+
+*app/assets/javascript/my.coffee.erb*
+
+    <% environment.context_class.instance_eval { include Rails.application.routes.url_helpers } %>
+    foo = "<%= root_path %>
+    alert foo
+
+**note:** more info on this find it [this StackOverflow question](http://stackoverflow.com/questions/7451517/using-a-rails-helper-method-within-a-javascript-asset)
+
+I was wondering, "is there way to pass CoffeeScript variable into ERB method ?" 
+The answer is: no ...not directly
+
+Let say you want to call member action on Documents controller with AJAX
+
+you can do it this way 
+   
+*app/assets/javascript/my.coffee*
+
+      document_id = 123
+      $.ajax 'documents/' + document_id + '/my_member_action',
+        type: 'get'
+        dataType: 'json'
+        data:
+          foo: "foo"
+          bar: "bar"
+        success: (data) ->
+          #..
+
+but better idea is Rails way:
+
+*app/assets/javascript/my.coffee.erb*
+
+      <% environment.context_class.instance_eval { include Rails.application.routes.url_helpers } %>
+      document_id = 123
+      url = "<%= my_member_action_documents_path( id: "document_id") %>".replace(/document_id/, document_id)
+      $.ajax url,
+        type: 'get'
+        dataType: 'json'
+        data:
+          foo: "foo"
+          bar: "bar"
+        success: (data) ->
+          #..
+
+I'll generate my  *my_member_action_documents_path* string with *id = "document_id"* ...
+
+     documents/document_id/my_member_action
+
+... and than I'll replace it with value inside CoffeeScript variable *document_id*
+
+     documents/123/my_member_action
+
+
+The main advantage of using Rails paths is your javascirpt assets is that when routes changes, many times developers forget to change JavaScript files. Many applications don't have tests on JavaScript, and so this way your code will blow up with NoMethodError
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+# Load factories properly 
+
+I had one factory which was creating resource from another factory.
+
+    FactoryGirl.define do
+      factory :verification do
+        verifier_id User.last || FactoryGirl.create(:user)
+        verified_at Time.now
+        item  FactoryGirl.create(document)
+      end
+    end
+
+
+on verifier ( User resource) factory was created correctly but the item (Document resource) factory was throwing 
+
+    Factory not registered: document (ArgumentError)
+
+I was googling for a while and found [this](http://stackoverflow.com/questions/8409787/factorygirl-factory-not-registered-user-argumenterror) post. Basically the solution is to do something like this in your spec/spec_helper.rb file
+
+    require 'factory_girl_rails'
+    FactoryGirl.factories.clear
+    FactoryGirl.find_definitions
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+# RSpec on Rails callback presence
+
+let say we have this model (e.g.: described in [this](http://stackoverflow.com/questions/7361036/rspec2-testing-a-before-validation-method) StackOverflow question)
+
+    class Part < ActiveRecord::Base
+      before_validation :strip_whitespace
+
+    protected
+      def strip_whitespace
+        self.title = self.title.strip
+      end
+    end
+
+the proper way to write the spec is to separately write spec on **strip_whitespace** method and then just check if model class have callback set on it, like this: 
+
+    describe Part do
+      let(:record){ described_class.new }
+
+      it{ described_class._validation_callbacks.select{|cb| cb.kind.eql?(:before)}.collect(&:filter).should include(:strip_whitespace) }
+
+      #private methods
+      describe :strip_whitespace do
+        subject{record.send(:strip_whitespace)} # send() because calling private method
+        before{ record.stub(:title).and_return('    foo    ')
+        it "should strip white spaces" do
+          subject.should eq 'foo'
+          # or even shorter
+          should eq 'foo'
+        end
+      end
+    end
+
+if you need to skip callback behavior in some scenarios use
+
+   before{ Part.skip_callback(:validation, :before, :strip_whitespace)}
+   before{ Part.set_callback( :validation, :before, :strip_whitespace)}
+
+other links 
+http://api.rubyonrails.org/classes/ActiveRecord/Callbacks.html#label-Debugging+callbacks
+http://stackoverflow.com/questions/7361036/rspec2-testing-a-before-validation-method
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Rails ActiveRecord good to know
+
+## rails automatically converts integer to boolean on boolean type column
+
+Let say we have model "Job" with boolean Active Record column "urgent"
+
+      j = Job.new
+      j.urgent        #nil
+
+      J.urgent = true
+      J.urgent        #true
+
+      j.urgent = 0    
+      J.urgent        #false
+
+      j.urgent = 1
+      J.urgent        #true
+
+
+so rails is automatically converting them. Can be handy when migrating old non-rails database to new Ralis project... Good to know :) 
+
+
+## Incorrect database datetime is converted to nil
+
+Let say the database you're migrating has datetime columns by default set to "0000-00-00 00:00:00". This datetime is incorect because months are 0 month and 0 day. Rails won't let you set this and saves nil
+
+    a = Job.new
+
+    a = a.next_action_at = '0000-00-00 00:00:00'
+    a.next_action_at    # nil
+
+As you might know Unix timpestamp is pointing to 1st of January 1970
+
+    Time.at 0 #1970-01-01 01:00:00 +0100
+
+so 
+
+    a.next_action_at = '1970-01-01 00:00:00'
+    a.next_action_at.to_i    # 0
+
+and days before that
+
+    a.next_action_at = '170-08-20 00:00:00'
+    a.next_action_at.to_i    # -56782512000
+    a.next_action_at         # Mon, 20 Aug 0170 00:00:00 UTC +00:00
+
+Good to know :) 
+
+
+#  undefined method `capture_haml' it helper specs with haml
+
+
+it one helper I got 
+  
+~~~ruby
+  def some_helper
+    capture_haml do
+      haml_concat 'foo'
+    end
+  end
+~~~
+
+and I keep getting RSpec error
+
+     undefined method `capture_haml'
+
+the reason is that haml isn't loaded in helper spec yet
+
+
+~~~ruby 
+require "spec_helper"
+
+describe WidgetHelper do
+  before :each do
+    helper.extend Haml::Helpers
+    init_haml_helpers
+  end
+
+  it 'should correctly run my helper with capture haml' do
+    ...
+  end
+end
+~~~
+
+and you may also need to include haml helpers in rspec config
+
+~~~ruby
+
+  RSpec.configure do |config|
+    # ...
+
+    #haml helper
+    config.include Haml::Helpers, :type => :helper
+
+    # ...
+  end
+~~~
+
+-----------------------------------------------------------------
+
+
+
+
+# RSpec stack level too deep error when mocking incorectly
+
+
+have you ever run into this RSpec problem ?
+
+       Failure/Error: Unable to find matching line from backtrace
+       SystemStackError:
+         stack level too deep
+
+Thin error magically appears and disappear depending if you run *rspec spec* or *rspec spec/some_dir*, and it always works when I try to run rspec on one file causing this problem.
+First it seems to me like RSpec bug and  took me while to figure what I was doing wrong.
+
+
+~~~ruby
+describe SomeModel do
+  context 'when rss_url not parsable' do
+    before{Feedzirra::Feed.should_receive(:fetch_and_parse).at_least(1).with(record.rss_url).and_return('')}
+    it{record.errors_on(:rss_url).should include "Couldn't parse RSS url"}
+  end
+end
+~~~
+
+Do you see the problem ? (hint: ignore anything to do with Feedzira, concentrate on RSpec syntax)
+
+### answer: 
+
+I'm trying to stub **Feedzirra::Feed** in before statement (which I actually can do) is just I'm also checking **should_recive** which I is shouldn't do in **before** hook
+
+so this will work properly
+
+~~~ruby 
+
+# should_receive in it statemet works
+describe SomeModel do
+  context 'when rss_url not parsable' do
+    it do
+      Feedzirra::Feed.should_receive(:fetch_and_parse).at_least(1).with(record.rss_url).and_return('')
+      record.errors_on(:rss_url).should include "Couldn't parse RSS url"
+    end
+  end
+end
+
+~~~
+
+so remember if you need to stub something in **before** block, never do it through should_receive, anything with word *"should"* belongs to it statement
+
+~~~ruby
+  # stubing works
+  context 'when rss_url not parsable' do
+    before{  Feedzirra::Feed.stub(:fetch_and_parse).with(record.rss_url).and_return('') }
+    it{ record.errors_on(:rss_url).should include "Couldn't parse RSS url"}
+  end
+~~~
+
+
+
+
+keywords: SystemStackError RSpec stack level too deep mock
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+# rails delegate on polymorphic association
+
+
+~~~ruby
+class Address < ActiveRecord::Base
+  belongs_to :addressable, :polymorphic => true
+  attr_accessible :phone
+
+  # address got column phone
+end
+~~~
+
+
+~~~ruby
+class Client < ActiveRecord::Base
+  has_one :address, :as => :addressable
+  delegate :phone, :to => :address, :prefix => true, :allow_nil => true
+end
+~~~
+
+
+### before delegation (just polymorphic association)
+
+    a = Client.new
+    a.address
+    #=>#<Address id: nil, ....
+    a.address.phone
+    #=> nil
+    a.address_phone
+    #NoMethodError: undefined method
+
+
+### after delegation
+
+    a = Client.new
+    a.address
+    #=>#<Address id: nil, ....
+    a.address.phone
+    #=> nil
+    a.address_phone
+    #=> nil
+
+
+http://apidock.com/rails/Module/delegate
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+# searching (greping) availible methods
+
+ever had a problem in Rails that you wasn't sure if your instance/class have certain method? ...so you did :
+
+~~~ruby
+user.methods
+~~~
+
+and hundred methods rolled up?
+
+recently my colleague showed me I can do 
+
+~~~ruby
+user.methods.grep /phone/
+~~~
+
+this also works with:
+
+~~~ruby
+User.methods.grep /first/
+~~~
+
+
+
+-----------------------------------------------------------------
+
+
+# passing hash to link to 
+
+you can pass hash to link_to
+
+~~~haml
+  %li= link_to 'Export All', {:controller=>controller_name,:action=>'index', :format=>:xls, :all=>'true'}
+~~~
+
+     /users.xls?all=true
+
+
+sometimes you want to render same params (e.g. export search resoult)
+
+~~~haml
+  %li= link_to('Export Page', params.merge({:format=>:xls, :controller => controller_name, :action => "index"}))
+~~~
+
+    /users.xls?q%5Bname_cont%5D=tom&q%5Bs%5D=email+asc
+
+[source](http://stackoverflow.com/questions/5286637/pass-all-params-forward)
+
+
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+# regular expression on several lines
+
+in ruby you can do several line regular expression, like this one by "ridgerunner" found on [StackOverflow](http://stackoverflow.com/questions/5719353/how-do-i-fix-this-multiline-regular-expression-in-ruby)
+
+~~~ruby
+re = / # Match a MARKDOWN CODE section.
+    (\r?\n)              # $1: CODE must be preceded by blank line
+    (                    # $2: CODE contents
+      (?:                # Group for multiple lines of code.
+        (?:\r?\n)+       # Each line preceded by a newline,
+        (?:[ ]{4}|\t).*  # and begins with four spaces or tab.
+      )+                 # One or more CODE lines
+      \r?\n              # CODE folowed by blank line.
+    )                    # End $2: CODE contents
+    (?=\r?\n)            # CODE folowed by blank line.
+    /x
+result = subject.gsub(re, '\1<pre>\2</pre>')
+~~~
+
+the thing is that at the end of expression ridgerunner is passing the "x" option 
+    /.*/x         extended: ignore whitespace in pattern
+
+[reference](http://www.ralfebert.de/blog/ruby/regex_cheat_sheet/)
+
+However, if you need regular expression with full support for white spaces, you can do other kind of regular expression comments,
+
+      /\d(?# my ultra evil comment
+      )/
+
+example form one helper I wrote
+
+~~~ruby
+html.should =~
+ /^<div class='box'>\s*(?# box div open tag
+   )<h4\s*class='box-header\s*round-top'>\s*(?# h4 open tag
+     )<i\s*class='box-icon\s*ultra-cool'><\/i>\s*(?# box icon
+     )foo Bar\s*(?# :title content 
+     )<a\s*class='box-btn'\s*title='close'>\s*<i\s*class='icon-remove'><\/i>\s*<\/a>\s*(?#remove button
+     )<a\s*class='box-btn'\s*title='toggle'>\s*<i\s*class='icon-minus'><\/i>\s*<\/a>\s*(?#minus button
+   )<\/h4>\s*(?#  h4 close tag
+   )<div class='box-container-toggle'>\s*(?# open div.box-container-toggle
+     )<div\s*class='box-content'\s?>\s*(?# open div.box-content
+       )#{text}\s*(?# # yield block
+     )<\/div>\s*(?# close div.box-content
+   )<\/div>\s*(?# close div.box-container-toggle
+ )<\/div>$/
+~~~
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+# rspec and haml helpers
+
+
+today I was creating helper to handle bootstrap table:
+
+~~~ruby
+# a/h/table_helper.rb
+#
+module TableHelper
+  def table
+    capture_haml do
+      haml_tag :table, :class=>['table', 'table.table-striped', 'table-bordered', 'table-condensed'] do
+        yield
+      end
+    end
+  end
+end
+~~~
+
+no extra magic, but when I wanted to create rspec on it I keep on getting 
+
+    undefined method `capture_haml' for #<#<Class:0x0000000364cf28>:0x00000003e32e40>
+
+now I found few really descriptive solutions on this close to my problem that should work like 
+http://2rg.tumblr.com/ (find "Including Haml Helpers in an RSpec spec" on site)
+
+ruby~~~
+# spec/spec_helper.rb
+require 'rubygems'
+require 'spork'
+
+Spork.prefork do
+  RSpec.configure do |config|
+    #...
+
+    #Helpers
+    config.include Haml::Helpers , :type => :helper
+    config.include ActionView::Helpers, :type => :helper
+    config.before :each, :type => :helper do
+      init_haml_helpers
+    end
+
+    #...
+  end
+end
+~~~
+
+(my colleague is using above one in similar project, from not too far ago and it's working)
+
+
+from http://blog.wolfman.com/articles/2007/7/14/using-rspec-to-test-haml-helpers  :
+
+~~~ruby
+describe ApplicationHelper do
+ 
+  before :each do
+    helper.extend Haml
+    helper.extend Haml::Helpers
+    helper.send :init_haml_helpers
+  end
+  
+  it do
+    helper.table do 
+     #...
+    end
+  end
+end
+~~~
+
+but in this one I keep on getting 
+
+     undefined local variable or method `init_haml_helpers'
+
+
+
+short story short
+
+~~~ruby
+# spec/spec_helper.rb
+require 'rubygems'
+require 'spork'
+
+Spork.prefork do
+  RSpec.configure do |config|
+    #...
+
+    #Helpers
+    config.include Haml::Helpers , :type => :helper
+
+    #...
+  end
+end
+
+
+# spec/helper/table_helper.rb
+describe TableHelper do
+ 
+  before :each do
+    helper.extend Haml::Helpers
+    init_haml_helpers
+  end
+  
+  it do
+    helper.table do 
+     #...
+    end
+  end
+end
+~~~
+
+
+...and this one  actually work for me.
+
+I'm running ruby-1.9.3-p194 rspec-2.10.0 rails-3.2.6
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#@todo Rails flash partial trouble 
+
+Today I found my colleague for dispalying flash messages: 
+
+~~~ruby
+- flash.each do |name, msg|
+  %div{:class => "alert alert-#{name == :notice ? "success" : "error"}"}
+    %a.close{"data-dismiss" => "alert"} ×
+    = content_tag :div, msg, :id => "flash_#{name}" if msg.is_a?(String)
+~~~
+
+pretty simple, but we were using this same code in two layouts. So lets remove duplicity and move it to partial.
+
+*app/views/layouts/application.html.haml*
+
+~~~ruby
+!!!
+%html
+  %head
+  %body
+    = render 'layouts/flash'
+~~~
+
+*app/views/layouts/admin.html.haml*
+
+~~~ruby
+!!!
+%html
+  %head
+  %body
+    = render 'layouts/flash'
+~~~
+
+*app/views/layouts/_flash.html.haml*
+
+~~~ruby
+- flash.each do |name, msg|
+  %div{:class => "alert alert-#{name == :notice ? "success" : "error"}"}
+    %a.close{"data-dismiss" => "alert"} ×
+    = content_tag :div, msg, :id => "flash_#{name}" if msg.is_a?(String)
+~~~
+
+Everything looks nice and should work, but when we test it will get:
+
+    ActionView::Template::Error (undefined method `each' for nil:NilClass)
+
+hmm...
+
+so maybe the locale variable is incorrectly passed, lets try this
+
+
+~~~ruby
+= render 'layouts/flash', :locales => {:flash => flash}
+~~~
+
+same error!
+
+    ActionView::Template::Error (undefined method `each' for nil:NilClass)
+
+After googling for a while I found this same problem on Stack Overflow: 
+http://stackoverflow.com/questions/8023396/rails-3-notice-and-error-flash-cannot-be-rendered-in-a-partial
+
+The thing is that rails partial is initializing variable named *flash* and overwriting our *flash* *flash*. So the solution is simple, don't name the partial "flash" 
+
+so change layouts to  
+
+*app/views/layouts/application.html.haml*
+
+~~~ruby
+#...
+    = render 'layouts/notice'
+~~~
+
+*app/views/layouts/admin.html.haml*
+
+~~~ruby
+#...
+    = render 'layouts/notice'
+~~~
+
+and rename *_flash* partial to *_notice* partial
+
+    mv app/views/layouts/_flash.html.haml app/views/layouts/_notice.html.haml
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+## PostgreSQL host problem in Linux Mint 13
+
+
+
+ Working on one project using PostgreSQL and  evrything configured correctly, I kept on getting 
+
+      rake db:migrate
+
+      rake aborted!
+      FATAL:  Peer authentication failed for user "postgres"
+
+
+the reason was that defaultly instaled PostgeSQL on Mint 13 requirest to specify host. 
+So quicksolution in my *database.yml* :
+
+
+    development:
+      adapter: postgresql
+      encoding: unicode
+      database: project_development
+      pool: 5
+      username: postgres
+      password: secret
+      host: localhost   #<<< solution 
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+#"fuzzystrmatch" module missing in Ubuntu and Mint 13
+
+Working on one PostgreSQL porject I had an issue running *rake db:migrate* 
+
+    PG::Error: ERROR:  could not open extension control file "/usr/share/postgresql/9.1/extension/fuzzystrmatch.control": No such file or directory
+    : create extension fuzzystrmatch
+
+solution 
+
+    sudo apt-get install postgresql-contrib 
+
+than another error ocured:
+
+    PG::Error: ERROR:  permission denied to create extension "fuzzystrmatch"
+    HINT:  Must be superuser to create this extension.
+    : create extension fuzzystrmatch
+
+now this has nothing to do with "sudo" user so running *sudo rake db:migrate* won't help. The reason for this was that the fuzzystrmatch module for postgress requires database super user.
+
+for me the solution was to just change the *database.yml* file to use deffault *postgres* super user
+
+      development:
+        adapter: postgresql
+        encoding: unicode
+        database: project_development
+        username: postgres
+        password: extrasafe
+        host: localhost
+
+but better solution will be ether in postgres config files garant usage of fuzzystrmatch module to regular users.
+
+
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+
+## rails hash that treets equally sybols and strings
+
+
+     x = HashWithIndifferentAccess.new
+
+example how to convert your regular hash to this kind of hash 
+
+    ruby-1.9.2-p290 :060 > old_hash = { :nyu => "Elfen lied" } 
+     => {:nyu=>"Elfen lied"} 
+    ruby-1.9.2-p290 :061 > old_hash['nyu']
+     => nil 
+    ruby-1.9.2-p290 :062 > old_hash[:nyu]
+     => "Elfen lied" 
+     
+     x = HashWithIndifferentAccess.new old_hash
+     => {"nyu"=>"Elfen lied"} 
+    ruby-1.9.2-p290 :066 > x[:nyu]
+     => "Elfen lied" 
+    ruby-1.9.2-p290 :067 > x['nyu']
+     => "Elfen lied" 
+
+
+ActionController parms are also this kind of hash :) 
+
+
+some other examples can be found http://rubyquicktips.com/post/603292403/accessing-a-hash-with-either-string-or-symbol-keys, http://as.rubyonrails.org/classes/HashWithIndifferentAccess.html
+
+##debugging airbrake errors
+
+### copy params from airbrake to console variable
+
+         prms = {"smtp-id"=>"<4f89914da0612_6d055bf298305d>",
+         "timestamp"=>"1334415695",
+         "token"=>
+          "dsgj4gu89h24587gh123458gh08",
+         "action"=>"create",
+         "event"=>"dropped",
+         "reason"=>"Unsubscribed Address",
+         "controller"=>"sendgrid_events",
+         "email"=>"bubla@mailinator.com"}
+
+### run console
+
+      app.post 'sendgrid_events', prms
+
+this represents post to /sendgrid_events (action create) with params that coused failture 
+
+
+## force ssl in rails 
+
+
+### on controller level 
+
+in *app/controller/your_controller.rb*
+
+     class LostPasswordsController < ApplicationController
+  
+       force_ssl
+       # or...    force_ssl if Rails.env.production?
+       
+
+       def index
+         #....
+       end
+     end 
+
+if globally use it in application controller 
+
+http://apidock.com/rails/ActionController/ForceSSL/ClassMethods/force_ssl
+
+
+### on route level 
+
+In *config/routes.rb*
+
+        MyApplication::Application.routes.draw do
+          resources :sessions, :constraints => { :protocol => "https" }
+        end
+
+
+or for several of them 
+
+        MyApplication::Application.routes.draw do
+          scope :constraints => { :protocol => "https" } do 
+            # All your SSL routes.
+          end
+        end
+
+
++ your links 
+
+         <%= link_to "Logout", sessions_url(:protocol => 'https'), :method => :delete %>
+
+[source for this solution](http://stackoverflow.com/a/3635419) also check http://www.themomorohoax.com/2010/10/08/using-ssl-in-rails-3
+
+
+## on whole app level
+
+rails 3.1
+
+        # config/application.rb
+        module MyApp
+          class Application < Rails::Application
+            config.force_ssl = false
+          end
+        end
+
+        # config/environments/production.rb
+        MyApp::Application.configure do
+          config.force_ssl = true
+        end
+
+[stolen from](http://www.simonecarletti.com/blog/2011/05/configuring-rails-3-https-ssl/) :) 
+
+
+
+
+
+
+## Bcrypt iplementation to Rails app
+
+http://bcrypt-ruby.rubyforge.org/classes/BCrypt/Password.html
+
+I was trying to iplement BCrypt encryption on one of tables and test that with rspec.
+
+
+### way it should be done and works
+
+
+
+~~~ruby
+    it "should encrypt password before creation creation" do
+      account = Bubla.new
+      account.password = 'lorem' 
+
+      account.save
+      account.reload
+
+      BCrypt::Password.new(account.password).should == 'lorem'
+    end
+~~~
+
+~~~ruby
+class Bubla < ActiveRecord::Base
+
+# database table has column called password
+
+  after_save :encrypt_password
+
+  private
+  def encrypt_password
+    begin
+      BCrypt::Password.new self.password  #will raise if non BCrypt string
+    rescue BCrypt::Errors::InvalidHash
+      self.update_attribute(:password, BCrypt::Password.create(self.password))
+    end
+  end
+
+end
+~~~
+
+
+
+
+On [BCrypt site](http://bcrypt-ruby.rubyforge.org/classes/BCrypt/Password.html) there was really straingt forward example how to do that. Of course I did it different way that didn't work. My logic was to encrypt password before it's saved to database.
+
+
+### way that will fail
+
+~~~ruby
+class Bubla < ActiveRecord::Base
+
+  before_save :encrypt_password
+
+  private
+  def encrypt_password
+    self.password =  BCrypt::Password.create(password)
+  end
+
+end
+~~~
+
+for some reason, in this scenarion rspec fails with 
+
+       Failure/Error: BCrypt::Password.new(account.password).should == 'lorem'
+       expected: "lorem"
+            got: "$2a$10$HOaDPmirWXqeAzHGzGFm.u0P.GUcnLabnVZGcvXCSV6MPH8w5rzu6" (using ==)
+
+
+
+
+
+
+another note: my colleague give me this link http://bcrypt-ruby.rubyforge.org/   ...there is another alternative how to do some parts, didn't get to it yet but you can check
+
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+
+
+
+## assets pipeline manifest files 
+
+
+In smaller app it's good practice to have only one asset pipeline manifest file => *app/assets/stylesheet/application.css* , but in larger sites you might find out you need mero.
+
+All you need is exact content as you have in *a/assetss/stylesheets/application.css* and copy it to your new one 
+
+for example 
+
+*app/assets/stylesheets/plain.css*
+
+    *= require_self
+    *= require other_file
+
+Now you can link to it in your views.
+
+*a/v/l/plain.html.haml*
+
+    = stylesheet_link_tag "plain"
+
+
+Because assets needs to be precompiled when running app, you need to add your new manifest file to list of environment manifest files 
+
+*config/environment/production.rb*
+
+     config.assets.precompile += %w( plain.css )
+  
+
+...else you get error like *plain.css isn't precompiled*  even if you run *rake assets:precompile*, once again do this even if you are precompiling assets locally 
+Do this on all environments that are running on remote servers (staging f.e.)
+
+
+
+-----------------------------------------------------------------
+
+
+
+
+## Checking user agent
+
+
+In one of tasks given to me I had to check if the website is wisited by iOS native browser (not Safari, the browser that is lunched when you open website inside iOS application) and hide navigation bar. The reasoning was that from UX perspective, user is viewing the site from inside the application, so he shouldn't be able to go to home page. (f.e. if he is viewing terms and conditions) 
+
+The reqirement was also that when viewing the website in iOS Safari, the navigation should be present. Because of this I couldn't use media queries nad just hide content if the device viewing the site has resolution les that 400px for example
+
+The only solution left was detect user agent. 
+
+so in my *app/assets/javascripts/detect_agent.js.coffee*
+
+    if (navigator.userAgent.match(/CustomAgent/) != null)
+      $('html').addClass('ios_app')   
+
+
+and css sass file 
+
+    html.ios_app
+      .web_only
+        display: none
+
+
+but there was on issue that content loaded in native browser was "jumping", so we decided to fix it on server level 
+
+
+in *a/c/application_controller.rb*
+
+      def custom_user_agent?
+        request.env["HTTP_USER_AGENT"] && request.env["HTTP_USER_AGENT"][/(CustomAgent)/]
+      end
+      helper_method :custom_user_agent?
+
+
+in *a/v/layout/application.html.haml*
+
+      %html{ :class=>"#{ 'lt_ios_app' if custom_user_agent? }"}
+
+
+
+Note: the *CustomAgent* is custom agent variable that iOS application was overwriting in this app. By deffault the native iOS browser user agent is similar to Safari web browser user agent so is hard to detect it for 100% sure. So there is a way how to change the user agent in iOS   
+
+solution from http://stackoverflow.com/questions/8487581/uiwebview-ios5-changing-user-agent , in iOS:
+
+    NSDictionary *dictionnary = [NSDictionary dictionaryWithObjectsAndKeys:@"Your user agent", @"UserAgent", nil];
+    [[NSUserDefaults standardUserDefaults] registerDefaults:dictionnary];  
+
+
+## Facebook posts to wall without image
+ 
+There are solutions to enforce facebook to display image once posted to fb wall http://stackoverflow.com/questions/1079599/facebook-post-link-image (just set the open graph meta tag image)
+But what if you don't want facebook image? The thing is that facebook is trying to be clever and pull an  image for you from your web site.
+
+the solution to do this is set the open graph image pointing to url of your website (don't point it to image, just website )
+
+    <meta content='http://example.eu/' property='og:image'>   
+
+
+Hovever, to make open graph meta tags working, you got to be sure that all required opet fcapd metatags are set correctly 
+
+*  og:title - The title of the entity.
+*  og:type - The type of entity. You must select a type from the list of Open Graph types.
+*  og:image - The URL to an image that represents the entity. Images must be at least 50 pixels by 50 pixels. Square images work best, but you are allowed to use images up to three times as wide as they are tall.
+*  og:url - The canonical, permanent URL of the page representing the entity. When you use Open Graph tags, the Like button posts a link to the og:url instead of the URL in the Like button code.
+*  og:site_name - A human-readable name for your site, e.g., "IMDb".
+*  fb:admins or fb:app_id - A comma-separated list of either the Facebook IDs of page administrators or a Facebook Platform application ID. At a minimum, include only your own Facebook ID.
+
+
+exapmle meta tag data
+
+    <meta content='' property='og:description'>
+    <meta content='' property='og:image'>   
+    <meta content='MyTest app' property='og:site_name'>
+    <meta content='http://example.eu' property='og:url'>
+    <meta content='website' property='og:type'>
+    <meta content='10000123456789' property='fb:admins'>
+    <meta content='Movies and music' property='og:title'>
+
+
+The *og:image* tag cannot be blank or the [facebook linter page](https://developers.facebook.com/tools/debug) will complain 
+
+    Object at URL 'http://example.eu/' of type 'website' is invalid because the given value '' for property 'og:image:url' could not be parsed as type 'url'.
+
+to be honest when it comes to this particular problem, image wasn't displayed even if the image tag was blank, but it's not good practice.
+
+
+[my question on SO](http://stackoverflow.com/questions/9704642/enforce-no-facebook-image-preview-when-posting-sharing-to-wall/9704725#9704725)
+
+
+## way to create custom time in future (or past( exact date 
+
+Datetime with exact year
+
+~~~ruby
+DateTime.civil(5000)
+#Wed, 01 Jan 5000 00:00:00 +0000 
+~~~
+
+
+~~~ruby
+datetime = DateTime.civil(2000, 1, 1, 0, 0, 0, Rational(-6, 24)) 
+#Sat, 01 Jan 2000 00:00:00 -0600 
+~~~
+
+http://api.rubyonrails.org/classes/DateTime.html
+
+
+
+
+
+in *config/enviroments/your_environment.rb* do
+
+    YourApp::Application.config.web_hostname = 'bubla.mysite.com'
+
+or better 
+
+    YourApp::Application.configure do
+      config.web_hostname = 'bubla.mysite.com'
+    end
+ 
+
+than access it in moddels 
+   
+    Rails.application.config.web_hostname 
+
+Why ? 
+
+it's much cleaner than seting constant in enviromests files
+
+ *config/enviroments/your_environment.rb* 
+
+      ENVIRONMENT_HOST_NAME= 'budla.mysite.com'   # it works but it's not pretty at all 
+
+
+
+
+# How to access routing helper inside model
+
+in model
+
+~~~ruby
+
+def some_methode
+  Rails.application.routes.url_helpers.user_url( favorit_user.guid, :host => 'eq8.eu' ) 
+end
+~~~
+
+will give me full path like *http://eq8.eu/user/atsusos23s*
+
+
+
+idea from http://stackoverflow.com/questions/5380703/rails-get-resource-path-in-model
+
+-----------------------------------------------------------------
