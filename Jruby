@@ -1,0 +1,59 @@
+What is JRuby?
+Install JRuby
+Why do people use JRuby?
+Getting past the GIL
+Library Access and Environment Access
+Long-Running Process Performance
+Why is my JRuby Program Slow?
+Inside --dev
+Why is my JRuby Program Wrong?
+What is TruffleRuby?
+Install TruffleRuby
+Performance Shoot-out
+Failure Of Fork
+Test with RubySpy
+Jekyll Test 1
+Jekyll Test 2
+Performance Advice
+Update
+More Resources
+Recently, I made some contributions to the continuous integration process for Jekyll. Jekyll is a static site generator created by GitHub and written in Ruby, and it uses Earthly and GitHub Actions to test that it works with Ruby 2.5, 2.7, 3.0, and JRuby.
+
+The build times looked like this:
+
+Ruby Version	Jekyll CI Time
+2.5	8m 31s
+2.7	8m 33s
+3.0	7m 47s
+JRuby	45m 16s
+A Representative Jekyll CI Build
+The Jekyll CI does lots of things in it that a simple Jekyll site build might not but clearly JRuby was slowing the whole process down by a significant amount, and this surprised me: Wasn’t the entire point of using JRuby, and its new brother TruffleRuby, speed? Why was JRuby so slow?
+
+Even building this blog and using all the tricks I’ve found, the performance of Ruby on the JVM still looks like this:
+
+Runtime	Jekyll Build Time
+MRI Ruby 2.7.0	2.64 seconds
+Fastest Ruby on JVM Build	25.7 seconds
+Building This blog is 10x slower
+So why is Jruby slow in these examples? It turns out that the answer is complicated.
+
+What is JRuby?
+I was very happy to discover the JRuby project, my favorite programming language running on what’s probably the best virtual machine in the world. - Peter Lind
+
+JRuby is an alternative Ruby interpreter that runs on the Java Virtual Machine (JVM). MRI Ruby, also known as CRuby, is written in C and is the standard interpreter and runtime for Ruby.
+
+Install JRuby
+On my mac book, I can switch from the MRI Ruby to JRuby like this.
+
+Install rbenv:
+
+brew install rbenv
+List possible install options:
+
+rbenv install -l     
+Install:
+
+rbenv install jruby-9.2.16.0
+Set a specific project to use JRuby:
+
+rbenv local jruby-9.2.16.0
