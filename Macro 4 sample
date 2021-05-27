@@ -1,0 +1,4 @@
+Suppose the samples are stored in columns C3 and C4 and you want to perform the test at alpha=0.03. To run the macro, choose Edit > Command Line Editor and type:
+
+%KSTWO C1 C4;
+ALPHA 0.03.
